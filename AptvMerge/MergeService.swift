@@ -3,13 +3,15 @@ import Foundation
 @MainActor
 final class MergeService {
     var onLog: ((String) -> Void)?
-    var onStateChange: ((Bool, String, String) -> Void)?
+    var onStateChange: ((Bool, String, String, String) -> Void)?
 
     private var httpProcess: Process?
     private var bufferProcess: Process?
     private var readerProcess: Process?
     private var mergeProcess: Process?
+    private var previewProcess: Process?
     private var outputURL = ""
+    private var previewOutputURL = ""
     private var currentDelaySeconds: Double = 0
     private var isStopping = false
 
@@ -28,6 +30,10 @@ final class MergeService {
         runtimeDirectory.appendingPathComponent("video-buffer", isDirectory: true)
     }
 
+    private var previewDirectory: URL {
+        hlsDirectory.appendingPathComponent("preview", isDirectory: true)
+    }
+
     private var delayControlURL: URL {
         runtimeDirectory.appendingPathComponent("delay.txt")
     }
@@ -40,6 +46,7 @@ final class MergeService {
 
         let ip = localIPAddress()
         outputURL = "http://\(ip):\(port)/index.m3u8"
+        previewOutputURL = "http://\(ip):\(port)/preview/index.m3u8"
 
         do {
             try startHTTPServer()
@@ -61,7 +68,9 @@ final class MergeService {
             }
 
             try await waitForOutputPlaylist()
-            onStateChange?(true, "运行中", outputURL)
+            try startPreviewStream()
+            try await waitForPreviewPlaylist()
+            onStateChange?(true, "运行中", outputURL, previewOutputURL)
             log("APTV 链接: \(outputURL)")
         } catch {
             await stop()
@@ -113,14 +122,16 @@ final class MergeService {
     func stop() async {
         isStopping = true
         stopProcess(mergeProcess)
+        stopProcess(previewProcess)
         stopProcess(readerProcess)
         stopProcess(bufferProcess)
         stopProcess(httpProcess)
         mergeProcess = nil
+        previewProcess = nil
         readerProcess = nil
         bufferProcess = nil
         httpProcess = nil
-        onStateChange?(false, "已停止", "")
+        onStateChange?(false, "已停止", "", "")
         isStopping = false
     }
 
@@ -129,6 +140,7 @@ final class MergeService {
         try FileManager.default.createDirectory(at: bufferDirectory, withIntermediateDirectories: true)
         try cleanDirectory(hlsDirectory)
         try cleanDirectory(bufferDirectory)
+        try FileManager.default.createDirectory(at: previewDirectory, withIntermediateDirectories: true)
     }
 
     private func cleanDirectory(_ url: URL) throws {
@@ -397,16 +409,67 @@ final class MergeService {
         ]
     }
 
+    private func startPreviewStream() throws {
+        let ffmpeg = try ffmpegPath()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats",
+            "-fflags", "+genpts",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-rw_timeout", "12000000",
+            "-i", "http://127.0.0.1:\(port)/index.m3u8",
+            "-map", "0:v:0",
+            "-map", "0:a:0",
+            "-c", "copy",
+            "-tag:v", "hvc1",
+            "-bsf:a", "aac_adtstoasc",
+            "-f", "hls",
+            "-hls_segment_type", "fmp4",
+            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_time", "4",
+            "-hls_list_size", "30",
+            "-hls_delete_threshold", "30",
+            "-hls_flags", "delete_segments",
+            "-hls_allow_cache", "0",
+            "-hls_segment_filename", previewDirectory.appendingPathComponent("prev_%05d.m4s").path,
+            previewDirectory.appendingPathComponent("index.m3u8").path
+        ]
+        attachLogging(to: process, name: "preview")
+        attachTerminationHandler(to: process, name: "preview")
+        try process.run()
+        previewProcess = process
+    }
+
     private func waitForOutputPlaylist() async throws {
         let playlist = hlsDirectory.appendingPathComponent("index.m3u8")
+        try await waitForPlaylist(playlist, process: { self.mergeProcess }, timeout: 90, readyLog: "HLS 输出就绪")
+    }
+
+    private func waitForPreviewPlaylist() async throws {
+        let playlist = previewDirectory.appendingPathComponent("index.m3u8")
+        try await waitForPlaylist(playlist, process: { self.previewProcess }, timeout: 30, readyLog: "内置播放流就绪")
+    }
+
+    private func waitForPlaylist(
+        _ playlist: URL,
+        process: () -> Process?,
+        timeout: TimeInterval,
+        readyLog: String
+    ) async throws {
         let started = Date()
-        while Date().timeIntervalSince(started) < 90 {
+        while Date().timeIntervalSince(started) < timeout {
             if FileManager.default.fileExists(atPath: playlist.path),
                (try? playlist.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0 > 0 {
-                log("HLS 输出就绪")
+                log(readyLog)
                 return
             }
-            if mergeProcess?.isRunning != true {
+            if process()?.isRunning != true {
                 throw MergeServiceError.mergeExited
             }
             try await Task.sleep(for: .milliseconds(500))
@@ -489,7 +552,7 @@ final class MergeService {
         if process == mergeProcess || process == httpProcess {
             mergeProcess = process == mergeProcess ? nil : mergeProcess
             httpProcess = process == httpProcess ? nil : httpProcess
-            onStateChange?(false, "已停止", "")
+            onStateChange?(false, "已停止", "", "")
         }
     }
 

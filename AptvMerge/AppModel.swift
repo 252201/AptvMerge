@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
     @Published var isRunning = false
     @Published var statusText = "已停止"
     @Published var outputURL = ""
+    @Published var previewURL = ""
     @Published var logs: [String] = []
 
     private let store = SourceStore()
@@ -28,11 +29,12 @@ final class AppModel: ObservableObject {
                 self?.appendLog(message)
             }
         }
-        service.onStateChange = { [weak self] running, status, url in
+        service.onStateChange = { [weak self] running, status, url, previewURL in
             Task { @MainActor in
                 self?.isRunning = running
                 self?.statusText = status
                 self?.outputURL = url
+                self?.previewURL = previewURL
             }
         }
     }

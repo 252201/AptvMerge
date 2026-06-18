@@ -138,6 +138,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     serviceControls
+                    InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
                     runtimeSettings
                     logPanel
                 }
