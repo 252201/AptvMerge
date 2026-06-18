@@ -8,10 +8,12 @@ final class AppModel: ObservableObject {
     @Published var selectedVideoID: UUID?
     @Published var selectedAudioID: UUID?
     @Published var delaySeconds: Double
+    @Published var isStarting = false
     @Published var isRunning = false
     @Published var statusText = "已停止"
     @Published var outputURL = ""
     @Published var previewURL = ""
+    @Published var isOutputURLVisible = false
     @Published var logs: [String] = []
 
     private let store = SourceStore()
@@ -23,6 +25,7 @@ final class AppModel: ObservableObject {
         selectedVideoID = store.loadSelectedID(key: "selectedVideoID") ?? loadedSources.first(where: { $0.kind == .video })?.id
         selectedAudioID = store.loadSelectedID(key: "selectedAudioID") ?? loadedSources.first(where: { $0.kind == .audio })?.id
         delaySeconds = UserDefaults.standard.object(forKey: "delaySeconds") as? Double ?? 0
+        isOutputURLVisible = UserDefaults.standard.object(forKey: "isOutputURLVisible") as? Bool ?? false
 
         service.onLog = { [weak self] message in
             Task { @MainActor in
@@ -31,6 +34,7 @@ final class AppModel: ObservableObject {
         }
         service.onStateChange = { [weak self] running, status, url, previewURL in
             Task { @MainActor in
+                self?.isStarting = false
                 self?.isRunning = running
                 self?.statusText = status
                 self?.outputURL = url
@@ -74,11 +78,16 @@ final class AppModel: ObservableObject {
     }
 
     func startService() async {
+        guard !isStarting else { return }
         guard let video = selectedVideoSource, let audio = selectedAudioSource else {
             appendLog("请选择视频源和音频源")
             return
         }
 
+        isStarting = true
+        statusText = isRunning ? "重启中" : "启动中"
+        outputURL = ""
+        previewURL = ""
         persistSelection()
         UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
 
@@ -86,12 +95,16 @@ final class AppModel: ObservableObject {
             try await service.start(video: video, audio: audio, delaySeconds: delaySeconds)
         } catch {
             appendLog("启动失败: \(error.localizedDescription)")
+            isStarting = false
             isRunning = false
             statusText = "启动失败"
+            outputURL = ""
+            previewURL = ""
         }
     }
 
     func stopService() async {
+        isStarting = false
         await service.stop()
     }
 
@@ -147,6 +160,11 @@ final class AppModel: ObservableObject {
 
     func clearLogs() {
         logs.removeAll()
+    }
+
+    func toggleOutputURLVisibility() {
+        isOutputURLVisible.toggle()
+        UserDefaults.standard.set(isOutputURLVisible, forKey: "isOutputURLVisible")
     }
 
     func copyOutputURL() {

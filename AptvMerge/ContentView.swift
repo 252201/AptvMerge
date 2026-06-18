@@ -71,20 +71,61 @@ struct ContentView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Label(model.statusText, systemImage: model.isRunning ? "dot.radiowaves.left.and.right" : "power")
-                    .foregroundStyle(model.isRunning ? .green : .secondary)
-                    .font(.callout.weight(.medium))
+                HStack(spacing: 8) {
+                    if model.isStarting {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: model.isRunning ? "dot.radiowaves.left.and.right" : "power")
+                    }
 
-                Text(model.outputURL.isEmpty ? "服务未启动" : model.outputURL)
-                    .font(.caption.monospaced())
-                    .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    Text(model.statusText)
+                }
+                .foregroundStyle(model.isRunning ? .green : .secondary)
+                .font(.callout.weight(.medium))
+
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    outputURLText
+
+                    Spacer(minLength: 6)
+
+                    Button {
+                        model.toggleOutputURLVisibility()
+                    } label: {
+                        Image(systemName: model.isOutputURLVisible ? "eye" : "eye.slash")
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.isOutputURLVisible ? "隐藏链接" : "显示链接")
+                    .disabled(model.outputURL.isEmpty)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
         }
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var outputURLDisplayText: String {
+        if model.outputURL.isEmpty {
+            return model.isStarting ? "正在准备链接" : "服务未启动"
+        }
+        return model.isOutputURLVisible ? model.outputURL : "链接已隐藏"
+    }
+
+    @ViewBuilder
+    private var outputURLText: some View {
+        if model.isOutputURLVisible {
+            Text(outputURLDisplayText)
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        } else {
+            Text(outputURLDisplayText)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
     }
 
     private func sourceSection(
@@ -175,14 +216,19 @@ struct ContentView: View {
             } label: {
                 Label("停止", systemImage: "stop.fill")
             }
-            .disabled(!model.isRunning)
+            .disabled(!model.isRunning && !model.isStarting)
 
             Button {
                 Task { await model.startService() }
             } label: {
-                Label(model.isRunning ? "重启" : "启动", systemImage: model.isRunning ? "arrow.clockwise" : "play.fill")
+                if model.isStarting {
+                    Label(model.isRunning ? "重启中" : "启动中", systemImage: "hourglass")
+                } else {
+                    Label(model.isRunning ? "重启" : "启动", systemImage: model.isRunning ? "arrow.clockwise" : "play.fill")
+                }
             }
             .keyboardShortcut(.defaultAction)
+            .disabled(model.isStarting)
         }
         .padding(20)
     }

@@ -39,7 +39,7 @@ final class MergeService {
     }
 
     func start(video: StreamSource, audio: StreamSource, delaySeconds: Double) async throws {
-        await stop()
+        await stop(notifyState: false)
         try prepareDirectories()
         isStopping = false
         currentDelaySeconds = delaySeconds
@@ -119,7 +119,7 @@ final class MergeService {
         try await start(video: video, audio: audio, delaySeconds: delaySeconds)
     }
 
-    func stop() async {
+    func stop(notifyState: Bool = true) async {
         isStopping = true
         stopProcess(mergeProcess)
         stopProcess(previewProcess)
@@ -131,7 +131,9 @@ final class MergeService {
         readerProcess = nil
         bufferProcess = nil
         httpProcess = nil
-        onStateChange?(false, "已停止", "", "")
+        if notifyState {
+            onStateChange?(false, "已停止", "", "")
+        }
         isStopping = false
     }
 
