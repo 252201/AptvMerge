@@ -18,6 +18,16 @@ final class AppModel: ObservableObject {
 
     private let store = SourceStore()
     private let service = MergeService()
+    private var currentLogFileURL: URL?
+
+    private var logsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("AptvMerge/logs", isDirectory: true)
+    }
+
+    private var currentLogURL: URL {
+        logsDirectory.appendingPathComponent("current.log")
+    }
 
     init() {
         let loadedSources = store.loadSources()
@@ -88,6 +98,7 @@ final class AppModel: ObservableObject {
         statusText = isRunning ? "重启中" : "启动中"
         outputURL = ""
         previewURL = ""
+        startNewLogFile(video: video, audio: audio)
         persistSelection()
         UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
 
@@ -176,9 +187,48 @@ final class AppModel: ObservableObject {
     private func appendLog(_ message: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-        logs.append("[\(formatter.string(from: Date()))] \(message)")
+        let line = "[\(formatter.string(from: Date()))] \(message)"
+        logs.append(line)
+        appendLogLineToFile(line)
         if logs.count > 600 {
             logs.removeFirst(logs.count - 600)
+        }
+    }
+
+    private func startNewLogFile(video: StreamSource, audio: StreamSource) {
+        logs.removeAll()
+        try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
+
+        let fileFormatter = DateFormatter()
+        fileFormatter.dateFormat = "yyyyMMdd-HHmmss"
+        let sessionURL = logsDirectory.appendingPathComponent("session-\(fileFormatter.string(from: Date())).log")
+
+        try? Data().write(to: currentLogURL, options: .atomic)
+        try? Data().write(to: sessionURL, options: .atomic)
+        currentLogFileURL = sessionURL
+
+        appendLog("日志文件: \(currentLogURL.path)")
+        appendLog("本次会话备份: \(sessionURL.path)")
+        appendLog("视频源: \(video.name)")
+        appendLog("音频源: \(audio.name)")
+        appendLog("时差: \(delayDescription)")
+    }
+
+    private func appendLogLineToFile(_ line: String) {
+        write(line, to: currentLogURL)
+        if let currentLogFileURL {
+            write(line, to: currentLogFileURL)
+        }
+    }
+
+    private func write(_ line: String, to url: URL) {
+        guard let data = "\(line)\n".data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
         }
     }
 }

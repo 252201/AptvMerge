@@ -7,6 +7,7 @@ final class MergeService {
 
     private var httpProcess: Process?
     private var bufferProcess: Process?
+    private var audioRelayProcess: Process?
     private var readerProcess: Process?
     private var mergeProcess: Process?
     private var previewProcess: Process?
@@ -28,6 +29,18 @@ final class MergeService {
 
     private var bufferDirectory: URL {
         runtimeDirectory.appendingPathComponent("video-buffer", isDirectory: true)
+    }
+
+    private var audioRelayDirectory: URL {
+        runtimeDirectory.appendingPathComponent("audio-relay", isDirectory: true)
+    }
+
+    private var audioRelayPlaylistURL: URL {
+        audioRelayDirectory.appendingPathComponent("index.m3u8")
+    }
+
+    private var delayedPlaylistURL: URL {
+        bufferDirectory.appendingPathComponent("delayed.m3u8")
     }
 
     private var previewDirectory: URL {
@@ -55,13 +68,14 @@ final class MergeService {
                 log("启动视频缓存层，视频延后 \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
                 try startVideoBuffer(video: video)
                 try await waitForBuffer(delaySeconds: delaySeconds, label: "视频")
-                try startBufferedVideoMerge(audio: audio, delaySeconds: delaySeconds)
+                log("启动音频中继，稳定解说音轨")
+                try startAudioRelay(audio: audio)
+                try await waitForAudioRelayPlaylist()
+                try startBufferedVideoMerge(delaySeconds: delaySeconds)
             } else if delaySeconds < 0 {
                 let audioDelay = -delaySeconds
-                log("启动音频缓存层，音频延后 \(audioDelay.formatted(.number.precision(.fractionLength(0...1))))s")
-                try startAudioBuffer(audio: audio)
-                try await waitForBuffer(delaySeconds: audioDelay, label: "音频")
-                try startBufferedAudioMerge(video: video, delaySeconds: audioDelay)
+                log("使用轻量音频延后，音频延后 \(audioDelay.formatted(.number.precision(.fractionLength(0...1))))s")
+                try startAudioOffsetMerge(video: video, audio: audio, delaySeconds: audioDelay)
             } else {
                 log("时差为 0，跳过缓存层")
                 try startDirectMerge(video: video, audio: audio)
@@ -101,17 +115,9 @@ final class MergeService {
 
         if delaySeconds < 0,
            currentDelaySeconds < 0,
-           bufferProcess?.isRunning == true,
-           readerProcess?.isRunning == true,
            mergeProcess?.isRunning == true {
-            let audioDelay = -delaySeconds
-            if bufferedSeconds() < audioDelay {
-                log("等待缓存达到新时差 \(audioDelay.formatted(.number.precision(.fractionLength(0...1))))s")
-                try await waitForBuffer(delaySeconds: audioDelay, label: "音频")
-            }
-            try writeDelayControl(audioDelay)
-            currentDelaySeconds = delaySeconds
-            log("已实时更新音频延后: \(audioDelay.formatted(.number.precision(.fractionLength(0...1))))s")
+            log("音频延后使用轻量偏移，正在重启合流进程应用新时差")
+            try await start(video: video, audio: audio, delaySeconds: delaySeconds)
             return
         }
 
@@ -124,11 +130,13 @@ final class MergeService {
         stopProcess(mergeProcess)
         stopProcess(previewProcess)
         stopProcess(readerProcess)
+        stopProcess(audioRelayProcess)
         stopProcess(bufferProcess)
         stopProcess(httpProcess)
         mergeProcess = nil
         previewProcess = nil
         readerProcess = nil
+        audioRelayProcess = nil
         bufferProcess = nil
         httpProcess = nil
         if notifyState {
@@ -140,8 +148,10 @@ final class MergeService {
     private func prepareDirectories() throws {
         try FileManager.default.createDirectory(at: hlsDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: bufferDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: audioRelayDirectory, withIntermediateDirectories: true)
         try cleanDirectory(hlsDirectory)
         try cleanDirectory(bufferDirectory)
+        try cleanDirectory(audioRelayDirectory)
         try FileManager.default.createDirectory(at: previewDirectory, withIntermediateDirectories: true)
     }
 
@@ -207,6 +217,17 @@ final class MergeService {
         bufferProcess = process
     }
 
+    private func startAudioRelay(audio: StreamSource) throws {
+        let ffmpeg = try ffmpegPath()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = audioRelayArguments(audio: audio)
+        attachLogging(to: process, name: "audio")
+        attachTerminationHandler(to: process, name: "audio")
+        try process.run()
+        audioRelayProcess = process
+    }
+
     private func startDirectMerge(video: StreamSource, audio: StreamSource) throws {
         let ffmpeg = try ffmpegPath()
         let process = Process()
@@ -218,29 +239,38 @@ final class MergeService {
         mergeProcess = process
     }
 
-    private func startBufferedVideoMerge(audio: StreamSource, delaySeconds: Double) throws {
+    private func startAudioOffsetMerge(video: StreamSource, audio: StreamSource, delaySeconds: Double) throws {
+        let ffmpeg = try ffmpegPath()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = audioOffsetMergeArguments(video: video, audio: audio, delaySeconds: delaySeconds)
+        attachLogging(to: process, name: "merge")
+        attachTerminationHandler(to: process, name: "merge")
+        try process.run()
+        mergeProcess = process
+    }
+
+    private func startBufferedVideoMerge(delaySeconds: Double) throws {
         let python = try executablePath(candidates: ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"])
         let ffmpeg = try ffmpegPath()
-        let pipe = Pipe()
         try writeDelayControl(delaySeconds)
 
-        let reader = Process()
-        reader.executableURL = URL(fileURLWithPath: python)
-        reader.arguments = ["-c", delayedReaderScript, bufferDirectory.path, delayControlURL.path, "\(delaySeconds)", "vid"]
-        reader.standardOutput = pipe
-        attachLogging(to: reader, name: "reader", captureStandardOutput: false)
-        attachTerminationHandler(to: reader, name: "reader")
+        let writer = Process()
+        writer.executableURL = URL(fileURLWithPath: python)
+        writer.arguments = ["-c", delayedPlaylistScript, bufferDirectory.path, delayControlURL.path, "\(delaySeconds)", "vid", delayedPlaylistURL.path]
+        attachLogging(to: writer, name: "reader", captureStandardOutput: false)
+        attachTerminationHandler(to: writer, name: "reader")
 
         let merge = Process()
         merge.executableURL = URL(fileURLWithPath: ffmpeg)
-        merge.arguments = bufferedMergeArguments(audio: audio)
-        merge.standardInput = pipe
+        merge.arguments = bufferedMergeArguments(videoPlaylist: delayedPlaylistURL, audioPlaylist: audioRelayPlaylistURL)
         attachLogging(to: merge, name: "merge")
         attachTerminationHandler(to: merge, name: "merge")
 
-        try reader.run()
+        try writer.run()
+        try waitForFile(delayedPlaylistURL, timeout: 10)
         try merge.run()
-        readerProcess = reader
+        readerProcess = writer
         mergeProcess = merge
     }
 
@@ -307,6 +337,45 @@ final class MergeService {
         return args
     }
 
+    private func audioOffsetMergeArguments(video: StreamSource, audio: StreamSource, delaySeconds: Double) -> [String] {
+        let delayMilliseconds = max(0, Int((delaySeconds * 1000).rounded()))
+        var args = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats",
+            "-fflags", "+genpts",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-rw_timeout", "12000000",
+            "-thread_queue_size", "2048",
+            "-i", video.url
+        ]
+
+        if !audio.userAgent.isEmpty {
+            args += ["-user_agent", audio.userAgent]
+        }
+
+        args += [
+            "-fflags", "+genpts",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-rw_timeout", "12000000",
+            "-thread_queue_size", "2048",
+            "-i", audio.url,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-filter:a", "adelay=\(delayMilliseconds):all=1",
+            "-c:a", "aac",
+            "-b:a", "128k"
+        ]
+        args += hlsOutputArguments()
+        return args
+    }
+
     private func audioBufferArguments(audio: StreamSource) -> [String] {
         var args = [
             "-nostdin",
@@ -342,15 +411,12 @@ final class MergeService {
         return args
     }
 
-    private func bufferedMergeArguments(audio: StreamSource) -> [String] {
+    private func audioRelayArguments(audio: StreamSource) -> [String] {
         var args = [
+            "-nostdin",
             "-hide_banner",
             "-loglevel", "warning",
-            "-nostats",
-            "-fflags", "+genpts",
-            "-re",
-            "-f", "mpegts",
-            "-i", "pipe:0"
+            "-nostats"
         ]
 
         if !audio.userAgent.isEmpty {
@@ -358,12 +424,50 @@ final class MergeService {
         }
 
         args += [
+            "-fflags", "+discardcorrupt+genpts",
+            "-err_detect", "ignore_err",
             "-reconnect", "1",
+            "-reconnect_at_eof", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
             "-rw_timeout", "12000000",
             "-thread_queue_size", "2048",
             "-i", audio.url,
+            "-map", "0:a:0",
+            "-vn",
+            "-af", "aresample=async=1:first_pts=0",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "20",
+            "-hls_delete_threshold", "20",
+            "-hls_flags", "delete_segments",
+            "-hls_allow_cache", "0",
+            "-hls_segment_filename", audioRelayDirectory.appendingPathComponent("aud_%05d.ts").path,
+            audioRelayPlaylistURL.path
+        ]
+        return args
+    }
+
+    private func bufferedMergeArguments(videoPlaylist: URL, audioPlaylist: URL) -> [String] {
+        var args = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats",
+            "-fflags", "+genpts",
+            "-re",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-i", videoPlaylist.path
+        ]
+
+        args += [
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-thread_queue_size", "2048",
+            "-i", audioPlaylist.path,
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
@@ -458,6 +562,10 @@ final class MergeService {
         try await waitForPlaylist(playlist, process: { self.previewProcess }, timeout: 30, readyLog: "内置播放流就绪")
     }
 
+    private func waitForAudioRelayPlaylist() async throws {
+        try await waitForPlaylist(audioRelayPlaylistURL, process: { self.audioRelayProcess }, timeout: 30, readyLog: "音频中继就绪")
+    }
+
     private func waitForPlaylist(
         _ playlist: URL,
         process: () -> Process?,
@@ -475,6 +583,18 @@ final class MergeService {
                 throw MergeServiceError.mergeExited
             }
             try await Task.sleep(for: .milliseconds(500))
+        }
+        throw MergeServiceError.outputTimeout
+    }
+
+    private func waitForFile(_ url: URL, timeout: TimeInterval) throws {
+        let started = Date()
+        while Date().timeIntervalSince(started) < timeout {
+            if FileManager.default.fileExists(atPath: url.path),
+               ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0) > 0 {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
         }
         throw MergeServiceError.outputTimeout
     }
@@ -678,7 +798,6 @@ def align_segment(buffer_dir, prefix, current, delay):
         if available > delay + 4:
             chosen, total = choose(buffer_dir, prefix, delay)
             if chosen is not None and chosen > current:
-                print(f"Adjusting delayed stream to {prefix}_{chosen:05d}.ts, target delay {delay:.3f}s", file=sys.stderr, flush=True)
                 return chosen
         return current
 
@@ -713,4 +832,110 @@ while True:
             out.write(chunk)
             out.flush()
     current += 1
+"""#
+
+private let delayedPlaylistScript = #"""
+import math
+import os
+import re
+import sys
+import time
+
+WINDOW_SIZE = 8
+
+def parse_playlist(buffer_dir, prefix):
+    path = os.path.join(buffer_dir, "index.m3u8")
+    try:
+        lines = [line.strip() for line in open(path, "r", encoding="utf-8")]
+    except FileNotFoundError:
+        return []
+    result = []
+    duration = None
+    for line in lines:
+        if line.startswith("#EXTINF:"):
+            duration = float(line.split(":", 1)[1].split(",", 1)[0])
+        elif line and not line.startswith("#") and duration is not None:
+            match = re.search(rf"{re.escape(prefix)}_(\d+)\.ts", line)
+            if match:
+                result.append((int(match.group(1)), duration))
+            duration = None
+    return result
+
+def choose(buffer_dir, prefix, delay):
+    segments = parse_playlist(buffer_dir, prefix)
+    total = 0.0
+    for number, duration in reversed(segments):
+        total += duration
+        if total >= delay:
+            return number, total
+    return None, total
+
+def delay_from_segment(buffer_dir, prefix, current):
+    total = 0.0
+    for number, duration in parse_playlist(buffer_dir, prefix):
+        if number >= current:
+            total += duration
+    return total
+
+def read_delay(path, fallback):
+    try:
+        value = float(open(path, "r", encoding="utf-8").read().strip())
+        return max(0.1, value)
+    except Exception:
+        return fallback
+
+def align_segment(buffer_dir, prefix, current, delay):
+    while True:
+        available = delay_from_segment(buffer_dir, prefix, current)
+        if available + 0.1 < delay:
+            time.sleep(0.2)
+            continue
+        if available > delay + 4:
+            chosen, total = choose(buffer_dir, prefix, delay)
+            if chosen is not None and chosen > current:
+                return chosen
+        return current
+
+def write_playlist(buffer_dir, prefix, output_path, current):
+    segments = [(number, duration) for number, duration in parse_playlist(buffer_dir, prefix) if number >= current]
+    if not segments:
+        return current
+
+    window = segments[:WINDOW_SIZE]
+    target_duration = max(1, math.ceil(max(duration for _, duration in window)))
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
+        f"#EXT-X-MEDIA-SEQUENCE:{window[0][0]}",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+    ]
+    for number, duration in window:
+        lines.append(f"#EXTINF:{duration:.6f},")
+        lines.append(f"{prefix}_{number:05d}.ts")
+
+    tmp_path = output_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.replace(tmp_path, output_path)
+    return window[0][0]
+
+buffer_dir = sys.argv[1]
+delay_path = sys.argv[2]
+delay = float(sys.argv[3])
+prefix = sys.argv[4]
+output_path = sys.argv[5]
+
+current, total = choose(buffer_dir, prefix, delay)
+while current is None:
+    time.sleep(0.5)
+    delay = read_delay(delay_path, delay)
+    current, total = choose(buffer_dir, prefix, delay)
+
+print(f"Starting delayed playlist at {prefix}_{current:05d}.ts, delay {total:.3f}s", file=sys.stderr, flush=True)
+while True:
+    delay = read_delay(delay_path, delay)
+    current = align_segment(buffer_dir, prefix, current, delay)
+    current = write_playlist(buffer_dir, prefix, output_path, current)
+    time.sleep(0.5)
 """#

@@ -5,16 +5,45 @@ struct ContentView: View {
     @StateObject private var model = AppModel()
     @State private var editingSource: SourceEditorState?
     @State private var sourcePendingDeletion: StreamSource?
+    @State private var isLogPanelVisible = true
+    @State private var hostWindow: NSWindow?
+
+    private let sidebarWidth: CGFloat = 340
+    private let controlPanelWidth: CGFloat = 900
+    private let logPanelWidth: CGFloat = 400
+    private let windowMinHeight: CGFloat = 680
+
+    private var visibleWindowWidth: CGFloat {
+        sidebarWidth + controlPanelWidth + logPanelWidth
+    }
+
+    private var hiddenWindowWidth: CGFloat {
+        sidebarWidth + controlPanelWidth
+    }
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             sourceSidebar
-                .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
+                .frame(width: sidebarWidth)
+
+            Divider()
 
             controlPanel
-                .frame(minWidth: 620)
+                .frame(width: controlPanelWidth)
+
+            if isLogPanelVisible {
+                Divider()
+
+                logPanel
+                    .frame(width: logPanelWidth)
+            }
         }
-        .frame(minWidth: 980, minHeight: 680)
+        .frame(width: isLogPanelVisible ? visibleWindowWidth : hiddenWindowWidth)
+        .frame(minHeight: windowMinHeight)
+        .background(WindowAccessor { window in
+            hostWindow = window
+            updateWindowSizeLimits(for: window)
+        })
         .sheet(item: $editingSource) { state in
             SourceEditorView(state: state) { source in
                 model.saveSource(source)
@@ -181,7 +210,6 @@ struct ContentView: View {
                     serviceControls
                     InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
                     runtimeSettings
-                    logPanel
                 }
                 .padding(20)
             }
@@ -196,13 +224,28 @@ struct ContentView: View {
                 .symbolRenderingMode(.hierarchical)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("APTV Merge")
-                    .font(.title2.weight(.semibold))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("APTV Merge")
+                        .font(.title2.weight(.semibold))
+                        .lineLimit(1)
+                    Text("v\(appVersion)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
                 Text("本机直播源合流服务")
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
+            .layoutPriority(1)
 
             Spacer()
+
+            Button {
+                toggleLogPanel()
+            } label: {
+                Label(isLogPanelVisible ? "收起日志" : "打开日志", systemImage: isLogPanelVisible ? "sidebar.right" : "sidebar.right")
+            }
+            .help(isLogPanelVisible ? "收起右侧日志窗口" : "打开右侧日志窗口")
 
             Button {
                 model.copyOutputURL()
@@ -233,6 +276,35 @@ struct ContentView: View {
         .padding(20)
     }
 
+    private func toggleLogPanel() {
+        let shouldShowLogPanel = !isLogPanelVisible
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isLogPanelVisible = shouldShowLogPanel
+        }
+
+        resizeWindowForLogPanel(showing: shouldShowLogPanel)
+    }
+
+    private func resizeWindowForLogPanel(showing: Bool) {
+        guard let window = hostWindow ?? NSApp.keyWindow else { return }
+
+        let targetWidth = showing ? visibleWindowWidth : hiddenWindowWidth
+        window.minSize = NSSize(width: targetWidth, height: windowMinHeight)
+        window.maxSize = NSSize(width: targetWidth, height: .greatestFiniteMagnitude)
+
+        var frame = window.frame
+        frame.size.width = targetWidth
+        window.setFrame(frame, display: true, animate: true)
+    }
+
+    private func updateWindowSizeLimits(for window: NSWindow?) {
+        guard let window else { return }
+        let targetWidth = isLogPanelVisible ? visibleWindowWidth : hiddenWindowWidth
+        window.minSize = NSSize(width: targetWidth, height: windowMinHeight)
+        window.maxSize = NSSize(width: targetWidth, height: .greatestFiniteMagnitude)
+    }
+
     private var serviceControls: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("当前组合")
@@ -244,6 +316,10 @@ struct ContentView: View {
                 SummaryTile(title: "模式", value: modeText, systemImage: "slider.horizontal.3")
             }
         }
+    }
+
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
     }
 
     private var modeText: String {
@@ -282,7 +358,7 @@ struct ContentView: View {
                 Spacer()
             }
 
-            Text("0 秒会跳过缓存层。正数表示视频延后；负数表示音频延后。同一延后模式内可动态调整，切换模式时会短暂重启合流进程。")
+            Text("0 秒会跳过缓存层。正数表示视频延后，可动态调整；负数表示音频延后，使用轻量偏移，应用新时差时会短暂重启合流进程。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -292,7 +368,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("日志")
-                    .font(.headline)
+                    .font(.title3.weight(.semibold))
                 Spacer()
                 Button {
                     model.clearLogs()
@@ -308,13 +384,32 @@ struct ContentView: View {
                     .textSelection(.enabled)
                     .padding(12)
             }
-            .frame(minHeight: 260)
             .background(Color(nsColor: .textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
                     .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
             }
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct WindowAccessor: NSViewRepresentable {
+    let onWindowChange: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            onWindowChange(view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            onWindowChange(nsView.window)
         }
     }
 }
