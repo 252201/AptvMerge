@@ -1,0 +1,11 @@
+dist/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+DerivedData/
+build/
+*.xcuserdatad/
+*.moved-aside
+*.ipa
+*.dSYM.zip
+*.dSYM
