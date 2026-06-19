@@ -128,12 +128,12 @@ final class MergeService {
 
     func stop(notifyState: Bool = true) async {
         isStopping = true
-        await stopProcess(mergeProcess)
-        await stopProcess(previewProcess)
-        await stopProcess(readerProcess)
-        await stopProcess(audioRelayProcess)
-        await stopProcess(bufferProcess)
-        await stopProcess(httpProcess)
+        await stopProcess(previewProcess, name: "preview")
+        await stopProcess(readerProcess, name: "reader")
+        await stopProcess(mergeProcess, name: "merge")
+        await stopProcess(audioRelayProcess, name: "audio")
+        await stopProcess(bufferProcess, name: "buffer")
+        await stopProcess(httpProcess, name: "http")
         mergeProcess = nil
         previewProcess = nil
         readerProcess = nil
@@ -264,8 +264,8 @@ final class MergeService {
 
     private func restartAudioRelayOffsetMerge(video: StreamSource, delaySeconds: Double) async throws {
         isStopping = true
-        await stopProcess(previewProcess)
-        await stopProcess(mergeProcess)
+        await stopProcess(previewProcess, name: "preview")
+        await stopProcess(mergeProcess, name: "merge")
         previewProcess = nil
         mergeProcess = nil
         isStopping = false
@@ -308,9 +308,9 @@ final class MergeService {
 
     private func restartBufferedVideoMerge(delaySeconds: Double) async throws {
         isStopping = true
-        await stopProcess(previewProcess)
-        await stopProcess(mergeProcess)
-        await stopProcess(readerProcess)
+        await stopProcess(previewProcess, name: "preview")
+        await stopProcess(readerProcess, name: "reader")
+        await stopProcess(mergeProcess, name: "merge")
         previewProcess = nil
         mergeProcess = nil
         readerProcess = nil
@@ -777,6 +777,18 @@ final class MergeService {
             }
         }
 
+        if processName == "reader" {
+            let readerStopNoisePatterns = [
+                "Traceback (most recent call last):",
+                "File \"<string>\"",
+                "BrokenPipeError",
+                "Broken pipe"
+            ]
+            if readerStopNoisePatterns.contains(where: { line.contains($0) }) {
+                return true
+            }
+        }
+
         return false
     }
 
@@ -803,10 +815,15 @@ final class MergeService {
         }
     }
 
-    private func stopProcess(_ process: Process?) async {
+    private func stopProcess(_ process: Process?, name: String) async {
         guard let process else { return }
+        guard process.isRunning else {
+            log("[\(name)] 进程已退出，状态码 \(process.terminationStatus)")
+            return
+        }
+
         ignoredTerminationPIDs.insert(process.processIdentifier)
-        guard process.isRunning else { return }
+        log("[\(name)] 正在停止进程")
         process.terminate()
 
         let terminateDeadline = Date().addingTimeInterval(2)
@@ -820,6 +837,12 @@ final class MergeService {
             while process.isRunning && Date() < interruptDeadline {
                 try? await Task.sleep(for: .milliseconds(100))
             }
+        }
+
+        if process.isRunning {
+            log("[\(name)] 进程停止超时，可能仍在运行")
+        } else {
+            log("[\(name)] 进程已退出，状态码 \(process.terminationStatus)")
         }
     }
 
