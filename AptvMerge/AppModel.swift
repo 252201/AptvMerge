@@ -120,17 +120,28 @@ final class AppModel: ObservableObject {
     }
 
     func applyDelayChange() async {
+        guard !isStarting else { return }
         UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
         guard isRunning else { return }
         guard let video = selectedVideoSource, let audio = selectedAudioSource else {
             appendLog("请选择视频源和音频源")
             return
         }
+        isStarting = true
+        statusText = "应用时差中"
         appendLog("应用新时差: \(delayDescription)")
         do {
             try await service.updateDelay(video: video, audio: audio, delaySeconds: delaySeconds)
+            isStarting = false
+            if isRunning {
+                statusText = "运行中"
+            }
         } catch {
+            isStarting = false
             appendLog("应用时差失败: \(error.localizedDescription)")
+            if isRunning {
+                statusText = "运行中"
+            }
         }
     }
 
