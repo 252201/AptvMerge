@@ -17,12 +17,13 @@ It is designed for local network playback with apps such as APTV, Apple TV playe
 - Hide or reveal the output URL in the UI.
 - View runtime logs in a right-side log panel.
 
-## Requirements
+## Runtime Requirements
 
 - macOS 13 or later.
-- Xcode.
 - Python 3.
 - FFmpeg.
+
+Xcode is not required if you install a prebuilt release. Xcode is only needed when building AptvMerge from source.
 
 Install FFmpeg with Homebrew:
 
@@ -46,7 +47,27 @@ Python is expected at one of:
 /usr/local/bin/python3
 ```
 
+## Install Prebuilt App
+
+Download the latest `AptvMerge.zip` from the GitHub Releases page:
+
+```text
+https://github.com/252201/AptvMerge/releases
+```
+
+Unzip it, then move `AptvMerge.app` into `/Applications`.
+
+Launch it with:
+
+```bash
+open /Applications/AptvMerge.app
+```
+
+The release build is not notarized. If macOS blocks the first launch, right-click `AptvMerge.app`, choose **Open**, then confirm once.
+
 ## Build From Source
+
+Building from source requires Xcode.
 
 Clone the repository:
 
@@ -69,7 +90,7 @@ xcodebuild -project AptvMerge.xcodeproj -scheme AptvMerge -configuration Release
 
 You can also open `AptvMerge.xcodeproj` in Xcode and run the `AptvMerge` scheme.
 
-## Install Locally
+## Install A Local Build
 
 After a Release build, copy the generated app into `/Applications`:
 
