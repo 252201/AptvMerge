@@ -4,6 +4,8 @@ AptvMerge is a macOS SwiftUI app that merges one live video stream and one live 
 
 It is designed for local network playback with apps such as APTV, Apple TV players, or any HLS-compatible client. The app also includes an in-app preview player.
 
+![AptvMerge app interface](docs/app-screenshot.png)
+
 ## Features
 
 - Merge a video live stream with a separate audio/commentary live stream.
