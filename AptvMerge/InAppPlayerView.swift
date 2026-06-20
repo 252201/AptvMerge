@@ -52,8 +52,11 @@ struct InAppPlayerPanel: View {
     }
 }
 
-private struct NativePlayerView: NSViewRepresentable {
+struct NativePlayerView: NSViewRepresentable {
     let urlString: String
+    var userAgent: String = ""
+    var delaySeconds: Double = 0
+    var isMuted: Bool = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -69,8 +72,11 @@ private struct NativePlayerView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
-        guard context.coordinator.currentURLString != urlString else { return }
-        context.coordinator.currentURLString = urlString
+        let roundedDelay = (delaySeconds * 10).rounded() / 10
+        let signature = "\(urlString)|\(userAgent)|\(roundedDelay)|\(isMuted)"
+        guard context.coordinator.currentSignature != signature else { return }
+        context.coordinator.currentSignature = signature
+        context.coordinator.pendingPlayTask?.cancel()
 
         guard let url = URL(string: urlString) else {
             nsView.player?.pause()
@@ -78,12 +84,36 @@ private struct NativePlayerView: NSViewRepresentable {
             return
         }
 
-        let player = AVPlayer(url: url)
+        let player: AVPlayer
+        if userAgent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            player = AVPlayer(url: url)
+        } else {
+            let asset = AVURLAsset(
+                url: url,
+                options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": userAgent]]
+            )
+            player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        }
+        player.isMuted = isMuted
         nsView.player = player
-        player.play()
+
+        if roundedDelay > 0 {
+            let task = Task { [weak player, weak coordinator = context.coordinator] in
+                try? await Task.sleep(for: .milliseconds(Int(roundedDelay * 1000)))
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard coordinator?.currentSignature == signature else { return }
+                    player?.play()
+                }
+            }
+            context.coordinator.pendingPlayTask = task
+        } else {
+            player.play()
+        }
     }
 
     final class Coordinator {
-        var currentURLString = ""
+        var currentSignature = ""
+        var pendingPlayTask: Task<Void, Never>?
     }
 }

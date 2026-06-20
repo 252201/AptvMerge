@@ -110,7 +110,7 @@ struct ContentView: View {
 
                     Text(model.statusText)
                 }
-                .foregroundStyle(model.isRunning ? .green : .secondary)
+                .foregroundStyle((model.isRunning || model.isCalibrating) ? .green : .secondary)
                 .font(.callout.weight(.medium))
 
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -136,6 +136,9 @@ struct ContentView: View {
 
     private var outputURLDisplayText: String {
         if model.outputURL.isEmpty {
+            if model.isCalibrating {
+                return "校准中，未生成链接"
+            }
             return model.isStarting ? "正在准备链接" : "服务未启动"
         }
         return model.isOutputURLVisible ? model.outputURL : "链接已隐藏"
@@ -208,8 +211,12 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     serviceControls
-                    InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
-                    runtimeSettings
+                    if model.isCalibrating {
+                        calibrationPanel
+                    } else {
+                        InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
+                        runtimeSettings
+                    }
                 }
                 .padding(20)
             }
@@ -259,15 +266,17 @@ struct ContentView: View {
             } label: {
                 Label("停止", systemImage: "stop.fill")
             }
-            .disabled(!model.isRunning && !model.isStarting)
+            .disabled(!model.hasActiveSession)
 
             Button {
                 Task { await model.startService() }
             } label: {
                 if model.isStarting {
-                    Label(model.isRunning ? "重启中" : "启动中", systemImage: "hourglass")
+                    Label("准备中", systemImage: "hourglass")
+                } else if model.isCalibrating {
+                    Label("重新校准", systemImage: "arrow.clockwise")
                 } else {
-                    Label(model.isRunning ? "重启" : "启动", systemImage: model.isRunning ? "arrow.clockwise" : "play.fill")
+                    Label(model.isRunning ? "重新校准" : "启动", systemImage: model.isRunning ? "arrow.clockwise" : "play.fill")
                 }
             }
             .keyboardShortcut(.defaultAction)
@@ -313,7 +322,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 SummaryTile(title: "视频", value: model.selectedVideoSource?.name ?? "未选择", systemImage: "play.rectangle")
                 SummaryTile(title: "音频", value: model.selectedAudioSource?.name ?? "未选择", systemImage: "waveform")
-                SummaryTile(title: "模式", value: modeText, systemImage: "slider.horizontal.3")
+                SummaryTile(title: "模式", value: phaseText, systemImage: "slider.horizontal.3")
             }
         }
     }
@@ -322,7 +331,10 @@ struct ContentView: View {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
     }
 
-    private var modeText: String {
+    private var phaseText: String {
+        if model.isCalibrating {
+            return "双源校准"
+        }
         if model.delaySeconds > 0 {
             return "视频延后"
         } else if model.delaySeconds < 0 {
@@ -360,6 +372,64 @@ struct ContentView: View {
 
             Text("0 秒会跳过缓存层。正数表示视频延后，可动态调整；负数表示音频延后，使用轻量偏移，应用新时差时会短暂重启合流进程。")
                 .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var calibrationPanel: some View {
+        if let video = model.selectedVideoSource, let audio = model.selectedAudioSource {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("同步校准")
+                        .font(.headline)
+                    Spacer()
+                    Text(model.calibrationMergeDescription)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(alignment: .top, spacing: 14) {
+                    SourcePreviewPanel(
+                        title: "视频源画面",
+                        source: video,
+                        previewURL: model.videoCalibrationPreviewURL,
+                        delaySeconds: $model.videoPreviewDelaySeconds,
+                        systemImage: "play.rectangle",
+                        isMuted: true
+                    )
+
+                    SourcePreviewPanel(
+                        title: "音频源画面",
+                        source: audio,
+                        previewURL: model.audioCalibrationPreviewURL,
+                        delaySeconds: $model.audioPreviewDelaySeconds,
+                        systemImage: "waveform",
+                        isMuted: false
+                    )
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        model.videoPreviewDelaySeconds = 0
+                        model.audioPreviewDelaySeconds = 0
+                    } label: {
+                        Label("重置延迟", systemImage: "arrow.counterclockwise")
+                    }
+
+                    Spacer()
+
+                    Button {
+                        Task { await model.confirmMerge() }
+                    } label: {
+                        Label("确认合并", systemImage: "checkmark.circle.fill")
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(model.isStarting)
+                }
+            }
+        } else {
+            Text("请选择视频源和音频源")
                 .foregroundStyle(.secondary)
         }
     }
@@ -469,6 +539,77 @@ private struct SummaryTile: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private struct SourcePreviewPanel: View {
+    let title: String
+    let source: StreamSource
+    let previewURL: String
+    @Binding var delaySeconds: Double
+    let systemImage: String
+    let isMuted: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.tint)
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(source.name)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.black)
+
+                if previewURL.isEmpty {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("预览准备中")
+                            .font(.callout.weight(.medium))
+                    }
+                    .foregroundStyle(.secondary)
+                } else {
+                    NativePlayerView(
+                        urlString: previewURL,
+                        delaySeconds: delaySeconds,
+                        isMuted: isMuted
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                Stepper(value: $delaySeconds, in: 0...240, step: 0.5) {
+                    TextField("0", value: $delaySeconds, format: .number.precision(.fractionLength(0...1)))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 72)
+                }
+
+                Text("延迟 \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 78, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 6))

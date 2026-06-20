@@ -2,12 +2,23 @@ import AppKit
 import Combine
 import Foundation
 
+enum AppRunPhase {
+    case stopped
+    case calibrating
+    case merging
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var sources: [StreamSource]
     @Published var selectedVideoID: UUID?
     @Published var selectedAudioID: UUID?
     @Published var delaySeconds: Double
+    @Published var videoPreviewDelaySeconds: Double
+    @Published var audioPreviewDelaySeconds: Double
+    @Published var videoCalibrationPreviewURL = ""
+    @Published var audioCalibrationPreviewURL = ""
+    @Published var phase: AppRunPhase = .stopped
     @Published var isStarting = false
     @Published var isRunning = false
     @Published var statusText = "已停止"
@@ -18,6 +29,7 @@ final class AppModel: ObservableObject {
 
     private let store = SourceStore()
     private let service = MergeService()
+    private let calibrationPreviewService = CalibrationPreviewService()
     private var currentLogFileURL: URL?
 
     private var logsDirectory: URL {
@@ -34,10 +46,18 @@ final class AppModel: ObservableObject {
         sources = loadedSources
         selectedVideoID = store.loadSelectedID(key: "selectedVideoID") ?? loadedSources.first(where: { $0.kind == .video })?.id
         selectedAudioID = store.loadSelectedID(key: "selectedAudioID") ?? loadedSources.first(where: { $0.kind == .audio })?.id
-        delaySeconds = UserDefaults.standard.object(forKey: "delaySeconds") as? Double ?? 0
+        let initialDelaySeconds = UserDefaults.standard.object(forKey: "delaySeconds") as? Double ?? 0
+        delaySeconds = initialDelaySeconds
+        videoPreviewDelaySeconds = 0
+        audioPreviewDelaySeconds = 0
         isOutputURLVisible = UserDefaults.standard.object(forKey: "isOutputURLVisible") as? Bool ?? false
 
         service.onLog = { [weak self] message in
+            Task { @MainActor in
+                self?.appendLog(message)
+            }
+        }
+        calibrationPreviewService.onLog = { [weak self] message in
             Task { @MainActor in
                 self?.appendLog(message)
             }
@@ -46,6 +66,7 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 self?.isStarting = false
                 self?.isRunning = running
+                self?.phase = running ? .merging : .stopped
                 self?.statusText = status
                 self?.outputURL = url
                 self?.previewURL = previewURL
@@ -83,6 +104,22 @@ final class AppModel: ObservableObject {
         logs.joined(separator: "\n")
     }
 
+    var isCalibrating: Bool {
+        phase == .calibrating
+    }
+
+    var hasActiveSession: Bool {
+        isCalibrating || isStarting || isRunning
+    }
+
+    var calibrationMergeDelaySeconds: Double {
+        videoPreviewDelaySeconds - audioPreviewDelaySeconds
+    }
+
+    var calibrationMergeDescription: String {
+        formatDelayDescription(calibrationMergeDelaySeconds)
+    }
+
     private var formattedDelay: String {
         delaySeconds.formatted(.number.precision(.fractionLength(0...1)))
     }
@@ -95,19 +132,69 @@ final class AppModel: ObservableObject {
         }
 
         isStarting = true
-        statusText = isRunning ? "重启中" : "启动中"
+        statusText = "准备校准"
         outputURL = ""
         previewURL = ""
-        startNewLogFile(video: video, audio: audio)
+        videoCalibrationPreviewURL = ""
+        audioCalibrationPreviewURL = ""
+        delaySeconds = 0
+        videoPreviewDelaySeconds = 0
+        audioPreviewDelaySeconds = 0
+        startNewLogFile(video: video, audio: audio, modeDescription: "同步校准")
         persistSelection()
-        UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
+
+        if isRunning {
+            await service.stop(notifyState: false)
+        }
+
+        isRunning = false
+        phase = .calibrating
+        statusText = "校准预览准备中"
 
         do {
+            let urls = try await calibrationPreviewService.start(video: video, audio: audio)
+            videoCalibrationPreviewURL = urls.videoURL
+            audioCalibrationPreviewURL = urls.audioURL
+            isStarting = false
+            statusText = "同步校准中"
+            appendLog("已打开双源预览，请调整两侧延迟，画面同步后点击确认合并")
+        } catch {
+            appendLog("校准预览启动失败: \(error.localizedDescription)")
+            isStarting = false
+            isRunning = false
+            phase = .stopped
+            statusText = "校准失败"
+        }
+    }
+
+    func confirmMerge() async {
+        guard !isStarting else { return }
+        guard let video = selectedVideoSource, let audio = selectedAudioSource else {
+            appendLog("请选择视频源和音频源")
+            return
+        }
+
+        delaySeconds = calibrationMergeDelaySeconds
+        UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
+        persistSelection()
+
+        isStarting = true
+        phase = .merging
+        statusText = "合并启动中"
+        outputURL = ""
+        previewURL = ""
+        startNewLogFile(video: video, audio: audio, modeDescription: calibrationMergeDescription)
+
+        do {
+            await calibrationPreviewService.stop()
+            videoCalibrationPreviewURL = ""
+            audioCalibrationPreviewURL = ""
             try await service.start(video: video, audio: audio, delaySeconds: delaySeconds)
         } catch {
             appendLog("启动失败: \(error.localizedDescription)")
             isStarting = false
             isRunning = false
+            phase = .stopped
             statusText = "启动失败"
             outputURL = ""
             previewURL = ""
@@ -116,7 +203,15 @@ final class AppModel: ObservableObject {
 
     func stopService() async {
         isStarting = false
+        await calibrationPreviewService.stop()
         await service.stop()
+        phase = .stopped
+        isRunning = false
+        statusText = "已停止"
+        outputURL = ""
+        previewURL = ""
+        videoCalibrationPreviewURL = ""
+        audioCalibrationPreviewURL = ""
     }
 
     func applyDelayChange() async {
@@ -206,7 +301,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func startNewLogFile(video: StreamSource, audio: StreamSource) {
+    private func startNewLogFile(video: StreamSource, audio: StreamSource, modeDescription: String? = nil) {
         logs.removeAll()
         try? FileManager.default.createDirectory(at: logsDirectory, withIntermediateDirectories: true)
 
@@ -222,7 +317,18 @@ final class AppModel: ObservableObject {
         appendLog("本次会话备份: \(sessionURL.path)")
         appendLog("视频源: \(video.name)")
         appendLog("音频源: \(audio.name)")
-        appendLog("时差: \(delayDescription)")
+        appendLog("时差: \(modeDescription ?? delayDescription)")
+    }
+
+    private func formatDelayDescription(_ delay: Double) -> String {
+        let formatted = delay.formatted(.number.precision(.fractionLength(0...1)))
+        if delay == 0 {
+            return "不设置时差"
+        } else if delay > 0 {
+            return "视频延后 \(formatted)s"
+        } else {
+            return "音频延后 \(formatted.dropFirst())s"
+        }
     }
 
     private func appendLogLineToFile(_ line: String) {

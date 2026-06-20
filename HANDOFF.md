@@ -1,9 +1,9 @@
 # AptvMerge 项目交接文档
 
-更新时间：2026-06-19  
+更新时间：2026-06-20  
 项目路径：`/Users/lpp/Desktop/Xcode/AptvMerge`  
-最新提交：`3b4f822 Refine logging panel and app packaging`  
-当前状态：App 可构建，可本机运行，可打包给其他 Mac 使用。当前有未提交变更：`AppModel.swift` / `MergeService.swift` 中的启动缓冲等待、FFmpeg 刷屏日志过滤、音频中继稳定化、视频延后管道读取和应用时差流程，以及本交接文档 `HANDOFF.md`。
+最新提交：以 `git log -1 --oneline` 为准  
+当前状态：App 可构建，可本机运行，可打包给其他 Mac 使用。启动后先进入双源同步校准，确认合并后再输出本机 HLS。
 
 ## 给新对话的开场提示
 
@@ -21,7 +21,14 @@ AptvMerge 是一个本机直播源合流 App：
 - 输出一个本机 HLS 链接，默认类似 `http://本机局域网IP:8080/index.m3u8`，可给 APTV、Apple TV 或其他局域网播放器打开。
 - App 内也提供内置播放预览，预览地址为 `http://127.0.0.1:8080/preview/index.m3u8`。
 - 支持手动添加/编辑/删除视频源和音频源。
-- 支持设置时差：
+- 启动后先进入“双源校准”阶段，不立即合流：
+  - 中间区域并排播放视频源画面和音频源画面。
+  - 音频源即使主要用于取解说音频，也会先显示它自带的视频画面，便于人工对齐。
+  - 两个预览窗口可分别设置非负延迟。
+  - 每次点击“启动/重新校准”都会从 `0s / 0s` 开始，不沿用上一次校准或合流留下的时差。
+  - 点击“确认合并”后，App 会用 `视频源窗口延迟 - 音频源窗口延迟` 换算成最终合流时差。
+  - 校准预览不要直接用 AVPlayer 播远端 IPTV/TS 源；当前由 `CalibrationPreviewService.swift` 先把两路源转成本机 fMP4 HLS，再给 AVPlayer 播放。
+- 支持设置/应用合流时差：
   - `0`：零时差，跳过缓存层，直接合流。
   - 正数：视频延后，使用视频缓存层。同为正数模式下应用新时差时，会保留视频缓存、音频中继和 HTTP 服务，只短暂重启 reader/merge/preview。
   - 负数：音频延后，使用音频中继 + FFmpeg `adelay` 轻量偏移，应用新时差会短暂重启合流/预览进程。
@@ -54,6 +61,7 @@ AptvMerge 是一个本机直播源合流 App：
 ├── AptvMerge/
 │   ├── AptvMergeApp.swift
 │   ├── AppModel.swift
+│   ├── CalibrationPreviewService.swift
 │   ├── ContentView.swift
 │   ├── InAppPlayerView.swift
 │   ├── MergeService.swift
@@ -102,6 +110,11 @@ AptvMerge 是一个本机直播源合流 App：
 - `selectedVideoID`
 - `selectedAudioID`
 - `delaySeconds`
+- `videoPreviewDelaySeconds`
+- `audioPreviewDelaySeconds`
+- `videoCalibrationPreviewURL`
+- `audioCalibrationPreviewURL`
+- `phase`
 - `isStarting`
 - `isRunning`
 - `statusText`
@@ -109,6 +122,14 @@ AptvMerge 是一个本机直播源合流 App：
 - `previewURL`
 - `isOutputURLVisible`
 - `logs`
+
+启动流程：
+
+- 顶部“启动”按钮现在先进入校准阶段，不直接调用 `MergeService.start(...)` 合流。
+- 校准阶段由 `CalibrationPreviewService.start(...)` 启动两路 FFmpeg 本机预览。
+- 每次进入校准都会强制把 `delaySeconds`、`videoPreviewDelaySeconds`、`audioPreviewDelaySeconds` 设为 `0`。
+- “确认合并”调用 `confirmMerge()`，把两个预览窗口延迟换算成 `delaySeconds` 后再启动合流。
+- 确认合并后校准面板会消失，音频源的视频画面关闭，只保留合并后的内置播放预览。
 
 日志规则：
 
@@ -178,6 +199,33 @@ FFmpeg 路径查找顺序：
 /opt/homebrew/bin/ffmpeg
 /usr/local/bin/ffmpeg
 /opt/local/bin/ffmpeg
+```
+
+### `CalibrationPreviewService.swift`
+
+负责“双源校准”阶段的临时预览，不做合流。
+
+流程：
+
+- 使用 Python HTTP 服务把校准目录发布到 `127.0.0.1:8081`。
+- 启动两个 FFmpeg 进程：
+  - `cal-video`：把视频源转为 `Calibration/video/index.m3u8`。
+  - `cal-audio`：把音频源自带的视频/音频转为 `Calibration/audio/index.m3u8`。
+- 两路都输出 fMP4 HLS，供 macOS `AVPlayer` 播放。
+- `AppModel.confirmMerge()` 会先停止校准预览，再启动真正合流；这样确认合并后音频源视频画面会关闭，只取音频参与合并。
+
+运行目录：
+
+```text
+~/Library/Application Support/AptvMerge/Calibration/
+├── video/
+│   ├── index.m3u8
+│   ├── init.mp4
+│   └── seg_*.m4s
+└── audio/
+    ├── index.m3u8
+    ├── init.mp4
+    └── seg_*.m4s
 ```
 
 Python 路径查找顺序：
