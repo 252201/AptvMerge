@@ -328,7 +328,7 @@ struct ContentView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.1"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
     }
 
     private var phaseText: String {
