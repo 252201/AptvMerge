@@ -2,6 +2,7 @@ dist/
 xcuserdata/
 *.xcuserstate
 .DS_Store
+HANDOFF.md
 DerivedData/
 build/
 *.xcuserdatad/

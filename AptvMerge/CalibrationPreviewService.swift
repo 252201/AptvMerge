@@ -174,7 +174,7 @@ final class CalibrationPreviewService {
             for line in text.split(whereSeparator: \.isNewline) {
                 let trimmed = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
-                guard !Self.shouldSuppressLogLine(trimmed) else { continue }
+                guard !Self.shouldSuppressLogLine(trimmed, processName: name) else { continue }
                 Task { @MainActor in
                     self?.log("[\(name)] \(trimmed)")
                 }
@@ -182,14 +182,34 @@ final class CalibrationPreviewService {
         }
     }
 
-    private nonisolated static func shouldSuppressLogLine(_ line: String) -> Bool {
-        [
+    private nonisolated static func shouldSuppressLogLine(_ line: String, processName: String) -> Bool {
+        if processName == "cal-http",
+           line.contains("\"GET /"),
+           line.contains("HTTP/1.1\" 200") {
+            return true
+        }
+
+        if processName == "cal-audio" {
+            let audioRelayNoisePatterns = [
+                "Stream ends prematurely",
+                "Will reconnect",
+                "PES packet size mismatch",
+                "Packet corrupt"
+            ]
+            if audioRelayNoisePatterns.contains(where: { line.contains($0) }) {
+                return true
+            }
+        }
+
+        return [
             "Skipping invalid undecodable NALU",
             "non-existing PPS",
             "no frame!",
             "Last message repeated",
             "Stream HEVC is not hvc1",
-            "mime type is not rfc8216 compliant"
+            "mime type is not rfc8216 compliant",
+            "Packet duration:",
+            "is out of range"
         ].contains { line.contains($0) }
     }
 

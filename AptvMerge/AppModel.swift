@@ -64,12 +64,18 @@ final class AppModel: ObservableObject {
         }
         service.onStateChange = { [weak self] running, status, url, previewURL in
             Task { @MainActor in
-                self?.isStarting = false
-                self?.isRunning = running
-                self?.phase = running ? .merging : .stopped
-                self?.statusText = status
-                self?.outputURL = url
-                self?.previewURL = previewURL
+                guard let self else { return }
+                self.isStarting = false
+                self.isRunning = running
+                self.phase = running ? .merging : .stopped
+                self.statusText = status
+                self.outputURL = url
+                self.previewURL = previewURL
+                if !running {
+                    await self.calibrationPreviewService.stop()
+                    self.videoCalibrationPreviewURL = ""
+                    self.audioCalibrationPreviewURL = ""
+                }
             }
         }
     }
@@ -173,6 +179,10 @@ final class AppModel: ObservableObject {
             appendLog("请选择视频源和音频源")
             return
         }
+        guard !videoCalibrationPreviewURL.isEmpty, !audioCalibrationPreviewURL.isEmpty else {
+            appendLog("校准预览尚未就绪")
+            return
+        }
 
         delaySeconds = calibrationMergeDelaySeconds
         UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
@@ -186,16 +196,20 @@ final class AppModel: ObservableObject {
         startNewLogFile(video: video, audio: audio, modeDescription: calibrationMergeDescription)
 
         do {
-            await calibrationPreviewService.stop()
+            appendLog("确认合并：复用当前校准预览流，不重新连接远端源")
+            try await service.startFromCalibration(
+                videoURL: videoCalibrationPreviewURL,
+                audioURL: audioCalibrationPreviewURL,
+                delaySeconds: delaySeconds
+            )
             videoCalibrationPreviewURL = ""
             audioCalibrationPreviewURL = ""
-            try await service.start(video: video, audio: audio, delaySeconds: delaySeconds)
         } catch {
             appendLog("启动失败: \(error.localizedDescription)")
             isStarting = false
             isRunning = false
-            phase = .stopped
-            statusText = "启动失败"
+            phase = .calibrating
+            statusText = "同步校准中"
             outputURL = ""
             previewURL = ""
         }
@@ -203,8 +217,8 @@ final class AppModel: ObservableObject {
 
     func stopService() async {
         isStarting = false
-        await calibrationPreviewService.stop()
         await service.stop()
+        await calibrationPreviewService.stop()
         phase = .stopped
         isRunning = false
         statusText = "已停止"

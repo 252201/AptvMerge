@@ -91,6 +91,31 @@ final class MergeService {
         }
     }
 
+    func startFromCalibration(videoURL: String, audioURL: String, delaySeconds: Double) async throws {
+        await stop(notifyState: false)
+        try prepareDirectories()
+        isStopping = false
+        currentDelaySeconds = delaySeconds
+
+        let ip = localIPAddress()
+        outputURL = "http://\(ip):\(port)/index.m3u8"
+        previewOutputURL = "http://\(ip):\(port)/preview/index.m3u8"
+
+        do {
+            try startHTTPServer()
+            log("复用校准预览流启动合流，\(formatDelayDescription(delaySeconds))")
+            try startCalibrationMerge(videoURL: videoURL, audioURL: audioURL, delaySeconds: delaySeconds)
+            try await waitForOutputPlaylist()
+            try startPreviewStream()
+            try await waitForPreviewPlaylist()
+            onStateChange?(true, "运行中", outputURL, previewOutputURL)
+            log("APTV 链接: \(outputURL)")
+        } catch {
+            await stop()
+            throw error
+        }
+    }
+
     func updateDelay(video: StreamSource, audio: StreamSource, delaySeconds: Double) async throws {
         guard isRunning else {
             try await start(video: video, audio: audio, delaySeconds: delaySeconds)
@@ -262,6 +287,17 @@ final class MergeService {
         mergeProcess = process
     }
 
+    private func startCalibrationMerge(videoURL: String, audioURL: String, delaySeconds: Double) throws {
+        let ffmpeg = try ffmpegPath()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = calibrationMergeArguments(videoURL: videoURL, audioURL: audioURL, delaySeconds: delaySeconds)
+        attachLogging(to: process, name: "merge")
+        attachTerminationHandler(to: process, name: "merge")
+        try process.run()
+        mergeProcess = process
+    }
+
     private func restartAudioRelayOffsetMerge(video: StreamSource, delaySeconds: Double) async throws {
         isStopping = true
         await stopProcess(previewProcess, name: "preview")
@@ -382,6 +418,48 @@ final class MergeService {
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "128k"
+        ]
+        args += hlsOutputArguments()
+        return args
+    }
+
+    private func calibrationMergeArguments(videoURL: String, audioURL: String, delaySeconds: Double) -> [String] {
+        var args = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats",
+            "-fflags", "+genpts"
+        ]
+
+        if delaySeconds > 0 {
+            args += ["-itsoffset", delaySeconds.formatted(.number.precision(.fractionLength(0...3)))]
+        }
+
+        args += [
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-thread_queue_size", "4096",
+            "-i", videoURL,
+            "-fflags", "+genpts"
+        ]
+
+        if delaySeconds < 0 {
+            args += ["-itsoffset", (-delaySeconds).formatted(.number.precision(.fractionLength(0...3)))]
+        }
+
+        args += [
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-thread_queue_size", "4096",
+            "-i", audioURL,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-tag:v", "hvc1",
+            "-filter:a", "aresample=async=1:first_pts=0",
             "-c:a", "aac",
             "-b:a", "128k"
         ]
@@ -759,7 +837,8 @@ final class MergeService {
             "no frame!",
             "Last message repeated",
             "Stream HEVC is not hvc1",
-            "mime type is not rfc8216 compliant"
+            "mime type is not rfc8216 compliant",
+            "Found duplicated MOOV Atom. Skipped it"
         ]
         if suppressedPatterns.contains(where: { line.contains($0) }) {
             return true
@@ -848,6 +927,17 @@ final class MergeService {
 
     private func log(_ message: String) {
         onLog?(message)
+    }
+
+    private func formatDelayDescription(_ delay: Double) -> String {
+        let formatted = delay.formatted(.number.precision(.fractionLength(0...1)))
+        if delay == 0 {
+            return "不设置时差"
+        } else if delay > 0 {
+            return "视频延后 \(formatted)s"
+        } else {
+            return "音频延后 \(formatted.dropFirst())s"
+        }
     }
 
     private func ffmpegPath() throws -> String {
