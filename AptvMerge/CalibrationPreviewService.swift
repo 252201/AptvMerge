@@ -9,6 +9,7 @@ final class CalibrationPreviewService {
     private var audioProcess: Process?
     private var videoDelayProcess: Process?
     private var audioDelayProcess: Process?
+    private var audioMergeProcess: Process?
     private var ignoredTerminationPIDs = Set<Int32>()
     private var isStopping = false
 
@@ -35,6 +36,10 @@ final class CalibrationPreviewService {
         runtimeDirectory.appendingPathComponent("audio-delayed", isDirectory: true)
     }
 
+    private var audioMergeDirectory: URL {
+        runtimeDirectory.appendingPathComponent("audio-merge", isDirectory: true)
+    }
+
     private var videoDelayControlURL: URL {
         runtimeDirectory.appendingPathComponent("video-delay.txt")
     }
@@ -55,6 +60,9 @@ final class CalibrationPreviewService {
 
         try await waitForPlaylist(videoDirectory.appendingPathComponent("index.m3u8"), process: { self.videoProcess }, name: "视频源原始预览")
         try await waitForPlaylist(audioDirectory.appendingPathComponent("index.m3u8"), process: { self.audioProcess }, name: "音频源原始预览")
+
+        try startAudioMergeRelay(sourcePlaylist: audioDirectory.appendingPathComponent("index.m3u8"))
+        try await waitForPlaylist(audioMergeDirectory.appendingPathComponent("index.m3u8"), process: { self.audioMergeProcess }, name: "音频合流中继")
 
         try startDelayedPlaylist(
             sourcePlaylist: videoDirectory.appendingPathComponent("index.m3u8"),
@@ -78,7 +86,7 @@ final class CalibrationPreviewService {
             videoPreviewURL: "http://127.0.0.1:\(port)/video-delayed/index.m3u8",
             audioPreviewURL: "http://127.0.0.1:\(port)/audio-delayed/index.m3u8",
             videoMergeURL: "http://127.0.0.1:\(port)/video/index.m3u8",
-            audioMergeURL: "http://127.0.0.1:\(port)/audio/index.m3u8"
+            audioMergeURL: "http://127.0.0.1:\(port)/audio-merge/index.m3u8"
         )
     }
 
@@ -91,6 +99,7 @@ final class CalibrationPreviewService {
         isStopping = true
         await stopProcess(videoDelayProcess, name: "cal-video-delay")
         await stopProcess(audioDelayProcess, name: "cal-audio-delay")
+        await stopProcess(audioMergeProcess, name: "cal-audio-merge")
         await stopProcess(videoProcess, name: "cal-video")
         await stopProcess(audioProcess, name: "cal-audio")
         await stopProcess(httpProcess, name: "cal-http")
@@ -98,6 +107,7 @@ final class CalibrationPreviewService {
         audioProcess = nil
         videoDelayProcess = nil
         audioDelayProcess = nil
+        audioMergeProcess = nil
         httpProcess = nil
         isStopping = false
     }
@@ -107,10 +117,12 @@ final class CalibrationPreviewService {
         try FileManager.default.createDirectory(at: audioDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: videoDelayedDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioDelayedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: audioMergeDirectory, withIntermediateDirectories: true)
         try cleanDirectory(videoDirectory)
         try cleanDirectory(audioDirectory)
         try cleanDirectory(videoDelayedDirectory)
         try cleanDirectory(audioDelayedDirectory)
+        try cleanDirectory(audioMergeDirectory)
     }
 
     private func cleanDirectory(_ url: URL) throws {
@@ -223,6 +235,46 @@ final class CalibrationPreviewService {
         }
     }
 
+    private func startAudioMergeRelay(sourcePlaylist: URL) throws {
+        let ffmpeg = try executablePath(candidates: [
+            "/opt/homebrew/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/local/bin/ffmpeg"
+        ])
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = [
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostats",
+            "-fflags", "+discardcorrupt+genpts",
+            "-err_detect", "ignore_err",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-allowed_extensions", "ALL",
+            "-thread_queue_size", "2048",
+            "-i", sourcePlaylist.path,
+            "-map", "0:a:0",
+            "-vn",
+            "-af", "aresample=async=1:first_pts=0",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-f", "hls",
+            "-hls_time", "2",
+            "-hls_list_size", "180",
+            "-hls_delete_threshold", "180",
+            "-hls_flags", "delete_segments",
+            "-hls_allow_cache", "0",
+            "-hls_segment_filename", audioMergeDirectory.appendingPathComponent("aud_%05d.ts").path,
+            audioMergeDirectory.appendingPathComponent("index.m3u8").path
+        ]
+        attachLogging(to: process, name: "cal-audio-merge")
+        attachTerminationHandler(to: process, name: "cal-audio-merge")
+        try process.run()
+        audioMergeProcess = process
+    }
+
     private func writeDelay(_ delay: Double, to url: URL) throws {
         let text = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), delay)
         try text.write(to: url, atomically: true, encoding: .utf8)
@@ -300,7 +352,7 @@ final class CalibrationPreviewService {
             }
         }
 
-        if processName == "cal-audio" {
+        if processName == "cal-audio" || processName == "cal-audio-merge" {
             let audioRelayNoisePatterns = [
                 "Stream ends prematurely",
                 "Will reconnect",
