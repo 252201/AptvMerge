@@ -18,6 +18,8 @@ final class AppModel: ObservableObject {
     @Published var audioPreviewDelaySeconds: Double
     @Published var videoCalibrationPreviewURL = ""
     @Published var audioCalibrationPreviewURL = ""
+    private var videoCalibrationMergeURL = ""
+    private var audioCalibrationMergeURL = ""
     @Published var phase: AppRunPhase = .stopped
     @Published var isStarting = false
     @Published var isRunning = false
@@ -75,6 +77,8 @@ final class AppModel: ObservableObject {
                     await self.calibrationPreviewService.stop()
                     self.videoCalibrationPreviewURL = ""
                     self.audioCalibrationPreviewURL = ""
+                    self.videoCalibrationMergeURL = ""
+                    self.audioCalibrationMergeURL = ""
                 }
             }
         }
@@ -143,6 +147,8 @@ final class AppModel: ObservableObject {
         previewURL = ""
         videoCalibrationPreviewURL = ""
         audioCalibrationPreviewURL = ""
+        videoCalibrationMergeURL = ""
+        audioCalibrationMergeURL = ""
         delaySeconds = 0
         videoPreviewDelaySeconds = 0
         audioPreviewDelaySeconds = 0
@@ -159,8 +165,10 @@ final class AppModel: ObservableObject {
 
         do {
             let urls = try await calibrationPreviewService.start(video: video, audio: audio)
-            videoCalibrationPreviewURL = urls.videoURL
-            audioCalibrationPreviewURL = urls.audioURL
+            videoCalibrationPreviewURL = urls.videoPreviewURL
+            audioCalibrationPreviewURL = urls.audioPreviewURL
+            videoCalibrationMergeURL = urls.videoMergeURL
+            audioCalibrationMergeURL = urls.audioMergeURL
             isStarting = false
             statusText = "同步校准中"
             appendLog("已打开双源预览，请调整两侧延迟，画面同步后点击确认合并")
@@ -179,7 +187,7 @@ final class AppModel: ObservableObject {
             appendLog("请选择视频源和音频源")
             return
         }
-        guard !videoCalibrationPreviewURL.isEmpty, !audioCalibrationPreviewURL.isEmpty else {
+        guard !videoCalibrationMergeURL.isEmpty, !audioCalibrationMergeURL.isEmpty else {
             appendLog("校准预览尚未就绪")
             return
         }
@@ -196,14 +204,17 @@ final class AppModel: ObservableObject {
         startNewLogFile(video: video, audio: audio, modeDescription: calibrationMergeDescription)
 
         do {
-            appendLog("确认合并：复用当前校准预览流，不重新连接远端源")
+            appendLog("确认合并：复用当前校准源流，不重新连接远端源")
+            appendLog("合流阶段应用校准时差: \(calibrationMergeDescription)")
             try await service.startFromCalibration(
-                videoURL: videoCalibrationPreviewURL,
-                audioURL: audioCalibrationPreviewURL,
+                videoURL: videoCalibrationMergeURL,
+                audioURL: audioCalibrationMergeURL,
                 delaySeconds: delaySeconds
             )
             videoCalibrationPreviewURL = ""
             audioCalibrationPreviewURL = ""
+            videoCalibrationMergeURL = ""
+            audioCalibrationMergeURL = ""
         } catch {
             appendLog("启动失败: \(error.localizedDescription)")
             isStarting = false
@@ -215,9 +226,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateCalibrationDelays() async {
+        guard isCalibrating else { return }
+        do {
+            try calibrationPreviewService.updateDelays(
+                videoDelay: videoPreviewDelaySeconds,
+                audioDelay: audioPreviewDelaySeconds
+            )
+        } catch {
+            appendLog("更新校准延迟失败: \(error.localizedDescription)")
+        }
+    }
+
     func stopService() async {
         isStarting = false
-        await service.stop()
+        await service.stop(notifyState: false)
         await calibrationPreviewService.stop()
         phase = .stopped
         isRunning = false
@@ -226,6 +249,8 @@ final class AppModel: ObservableObject {
         previewURL = ""
         videoCalibrationPreviewURL = ""
         audioCalibrationPreviewURL = ""
+        videoCalibrationMergeURL = ""
+        audioCalibrationMergeURL = ""
     }
 
     func applyDelayChange() async {

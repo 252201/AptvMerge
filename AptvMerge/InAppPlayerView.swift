@@ -96,20 +96,7 @@ struct NativePlayerView: NSViewRepresentable {
         }
         player.isMuted = isMuted
         nsView.player = player
-
-        if roundedDelay > 0 {
-            let task = Task { [weak player, weak coordinator = context.coordinator] in
-                try? await Task.sleep(for: .milliseconds(Int(roundedDelay * 1000)))
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    guard coordinator?.currentSignature == signature else { return }
-                    player?.play()
-                }
-            }
-            context.coordinator.pendingPlayTask = task
-        } else {
-            player.play()
-        }
+        player.play()
     }
 
     final class Coordinator {

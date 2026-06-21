@@ -428,6 +428,12 @@ struct ContentView: View {
                     .disabled(model.isStarting)
                 }
             }
+            .onChange(of: model.videoPreviewDelaySeconds) { _ in
+                Task { await model.updateCalibrationDelays() }
+            }
+            .onChange(of: model.audioPreviewDelaySeconds) { _ in
+                Task { await model.updateCalibrationDelays() }
+            }
         } else {
             Text("请选择视频源和音频源")
                 .foregroundStyle(.secondary)

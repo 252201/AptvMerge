@@ -446,10 +446,6 @@ final class MergeService {
             "-fflags", "+genpts"
         ]
 
-        if delaySeconds < 0 {
-            args += ["-itsoffset", (-delaySeconds).formatted(.number.precision(.fractionLength(0...3)))]
-        }
-
         args += [
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
             "-allowed_extensions", "ALL",
@@ -458,8 +454,17 @@ final class MergeService {
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
-            "-tag:v", "hvc1",
-            "-filter:a", "aresample=async=1:first_pts=0",
+            "-tag:v", "hvc1"
+        ]
+
+        if delaySeconds < 0 {
+            let delayMilliseconds = Int((-delaySeconds * 1000).rounded())
+            args += ["-filter:a", "adelay=\(delayMilliseconds):all=1,aresample=async=1:first_pts=0"]
+        } else {
+            args += ["-filter:a", "aresample=async=1:first_pts=0"]
+        }
+
+        args += [
             "-c:a", "aac",
             "-b:a", "128k"
         ]
