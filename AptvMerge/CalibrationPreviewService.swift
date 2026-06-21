@@ -9,7 +9,6 @@ final class CalibrationPreviewService {
     private var audioProcess: Process?
     private var videoDelayProcess: Process?
     private var audioDelayProcess: Process?
-    private var audioMergeProcess: Process?
     private var ignoredTerminationPIDs = Set<Int32>()
     private var isStopping = false
 
@@ -58,11 +57,23 @@ final class CalibrationPreviewService {
         try startPreview(source: video, outputDirectory: videoDirectory, name: "cal-video")
         try startPreview(source: audio, outputDirectory: audioDirectory, name: "cal-audio")
 
-        try await waitForPlaylist(videoDirectory.appendingPathComponent("index.m3u8"), process: { self.videoProcess }, name: "视频源原始预览")
-        try await waitForPlaylist(audioDirectory.appendingPathComponent("index.m3u8"), process: { self.audioProcess }, name: "音频源原始预览")
-
-        try startAudioMergeRelay(sourcePlaylist: audioDirectory.appendingPathComponent("index.m3u8"))
-        try await waitForPlaylist(audioMergeDirectory.appendingPathComponent("index.m3u8"), process: { self.audioMergeProcess }, name: "音频合流中继")
+        try await waitForSourcePlaylist(
+            source: video,
+            outputDirectory: videoDirectory,
+            playlist: videoDirectory.appendingPathComponent("index.m3u8"),
+            process: { self.videoProcess },
+            name: "cal-video",
+            readyName: "视频源原始预览"
+        )
+        try await waitForSourcePlaylist(
+            source: audio,
+            outputDirectory: audioDirectory,
+            playlist: audioDirectory.appendingPathComponent("index.m3u8"),
+            process: { self.audioProcess },
+            name: "cal-audio",
+            readyName: "音频源原始预览"
+        )
+        try await waitForPlaylist(audioMergeDirectory.appendingPathComponent("index.m3u8"), process: { self.audioProcess }, name: "音频合流中继")
 
         try startDelayedPlaylist(
             sourcePlaylist: videoDirectory.appendingPathComponent("index.m3u8"),
@@ -99,7 +110,6 @@ final class CalibrationPreviewService {
         isStopping = true
         await stopProcess(videoDelayProcess, name: "cal-video-delay")
         await stopProcess(audioDelayProcess, name: "cal-audio-delay")
-        await stopProcess(audioMergeProcess, name: "cal-audio-merge")
         await stopProcess(videoProcess, name: "cal-video")
         await stopProcess(audioProcess, name: "cal-audio")
         await stopProcess(httpProcess, name: "cal-http")
@@ -107,7 +117,6 @@ final class CalibrationPreviewService {
         audioProcess = nil
         videoDelayProcess = nil
         audioDelayProcess = nil
-        audioMergeProcess = nil
         httpProcess = nil
         isStopping = false
     }
@@ -176,20 +185,54 @@ final class CalibrationPreviewService {
             "-map", "0:v:0",
             "-map", "0:a:0?",
             "-c:v", "copy",
-            "-tag:v", "hvc1",
             "-c:a", "aac",
             "-b:a", "128k",
-            "-f", "hls",
-            "-hls_segment_type", "fmp4",
-            "-hls_fmp4_init_filename", "init.mp4",
-            "-hls_time", "2",
-            "-hls_list_size", "180",
-            "-hls_delete_threshold", "180",
-            "-hls_flags", "delete_segments",
-            "-hls_allow_cache", "0",
-            "-hls_segment_filename", outputDirectory.appendingPathComponent("seg_%05d.m4s").path,
-            outputDirectory.appendingPathComponent("index.m3u8").path
+            "-f", "hls"
         ]
+
+        if name == "cal-audio" {
+            args += [
+                "-hls_segment_type", "mpegts",
+                "-hls_time", "2",
+                "-hls_list_size", "180",
+                "-hls_delete_threshold", "180",
+                "-hls_flags", "delete_segments",
+                "-hls_allow_cache", "0",
+                "-hls_segment_filename", outputDirectory.appendingPathComponent("seg_%05d.ts").path,
+                outputDirectory.appendingPathComponent("index.m3u8").path
+            ]
+        } else {
+            args += [
+                "-tag:v", "hvc1",
+                "-hls_segment_type", "fmp4",
+                "-hls_fmp4_init_filename", "init.mp4",
+                "-hls_time", "2",
+                "-hls_list_size", "180",
+                "-hls_delete_threshold", "180",
+                "-hls_flags", "delete_segments",
+                "-hls_allow_cache", "0",
+                "-hls_segment_filename", outputDirectory.appendingPathComponent("seg_%05d.m4s").path,
+                outputDirectory.appendingPathComponent("index.m3u8").path
+            ]
+        }
+
+        if name == "cal-audio" {
+            args += [
+                "-map", "0:a:0",
+                "-vn",
+                "-af", "aresample=async=1:first_pts=0",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-f", "hls",
+                "-hls_time", "2",
+                "-hls_list_size", "180",
+                "-hls_delete_threshold", "180",
+                "-hls_flags", "delete_segments",
+                "-hls_allow_cache", "0",
+                "-hls_segment_filename", audioMergeDirectory.appendingPathComponent("aud_%05d.ts").path,
+                audioMergeDirectory.appendingPathComponent("index.m3u8").path
+            ]
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)
@@ -235,46 +278,6 @@ final class CalibrationPreviewService {
         }
     }
 
-    private func startAudioMergeRelay(sourcePlaylist: URL) throws {
-        let ffmpeg = try executablePath(candidates: [
-            "/opt/homebrew/bin/ffmpeg",
-            "/usr/local/bin/ffmpeg",
-            "/opt/local/bin/ffmpeg"
-        ])
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffmpeg)
-        process.arguments = [
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-nostats",
-            "-fflags", "+discardcorrupt+genpts",
-            "-err_detect", "ignore_err",
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-            "-allowed_extensions", "ALL",
-            "-thread_queue_size", "2048",
-            "-i", sourcePlaylist.path,
-            "-map", "0:a:0",
-            "-vn",
-            "-af", "aresample=async=1:first_pts=0",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-f", "hls",
-            "-hls_time", "2",
-            "-hls_list_size", "180",
-            "-hls_delete_threshold", "180",
-            "-hls_flags", "delete_segments",
-            "-hls_allow_cache", "0",
-            "-hls_segment_filename", audioMergeDirectory.appendingPathComponent("aud_%05d.ts").path,
-            audioMergeDirectory.appendingPathComponent("index.m3u8").path
-        ]
-        attachLogging(to: process, name: "cal-audio-merge")
-        attachTerminationHandler(to: process, name: "cal-audio-merge")
-        try process.run()
-        audioMergeProcess = process
-    }
-
     private func writeDelay(_ delay: Double, to url: URL) throws {
         let text = String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), delay)
         try text.write(to: url, atomically: true, encoding: .utf8)
@@ -293,6 +296,47 @@ final class CalibrationPreviewService {
             try await Task.sleep(for: .milliseconds(500))
         }
         throw MergeServiceError.outputTimeout
+    }
+
+    private func waitForSourcePlaylist(
+        source: StreamSource,
+        outputDirectory: URL,
+        playlist: URL,
+        process: () -> Process?,
+        name: String,
+        readyName: String
+    ) async throws {
+        let maxAttempts = 3
+        for attempt in 1...maxAttempts {
+            let started = Date()
+            while Date().timeIntervalSince(started) < 20 {
+                if mediaSegmentCount(in: playlist) >= 1 {
+                    log("\(readyName)就绪")
+                    return
+                }
+                if process()?.isRunning != true {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(500))
+            }
+
+            if mediaSegmentCount(in: playlist) >= 1 {
+                log("\(readyName)就绪")
+                return
+            }
+
+            guard attempt < maxAttempts else {
+                throw MergeServiceError.mergeExited
+            }
+
+            log("[\(name)] 启动未拿到播放列表，正在重试 \(attempt + 1)/\(maxAttempts)")
+            await stopProcess(process(), name: name)
+            try cleanDirectory(outputDirectory)
+            if name == "cal-audio" {
+                try cleanDirectory(audioMergeDirectory)
+            }
+            try startPreview(source: source, outputDirectory: outputDirectory, name: name)
+        }
     }
 
     private func mediaSegmentCount(in playlist: URL) -> Int {
@@ -352,7 +396,7 @@ final class CalibrationPreviewService {
             }
         }
 
-        if processName == "cal-audio" || processName == "cal-audio-merge" {
+        if processName == "cal-audio" {
             let audioRelayNoisePatterns = [
                 "Stream ends prematurely",
                 "Will reconnect",
@@ -394,17 +438,32 @@ final class CalibrationPreviewService {
 
     private func stopProcess(_ process: Process?, name: String) async {
         guard let process else { return }
-        guard process.isRunning else { return }
+        guard process.isRunning else {
+            log("[\(name)] 进程已退出，状态码 \(process.terminationStatus)")
+            return
+        }
+
         ignoredTerminationPIDs.insert(process.processIdentifier)
         log("[\(name)] 正在停止进程")
         process.terminate()
 
-        let deadline = Date().addingTimeInterval(2)
-        while process.isRunning && Date() < deadline {
+        let terminateDeadline = Date().addingTimeInterval(2)
+        while process.isRunning && Date() < terminateDeadline {
             try? await Task.sleep(for: .milliseconds(100))
         }
+
         if process.isRunning {
             process.interrupt()
+            let interruptDeadline = Date().addingTimeInterval(1)
+            while process.isRunning && Date() < interruptDeadline {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+
+        if process.isRunning {
+            log("[\(name)] 进程停止超时，可能仍在运行")
+        } else {
+            log("[\(name)] 进程已退出，状态码 \(process.terminationStatus)")
         }
     }
 
@@ -442,7 +501,7 @@ final class CalibrationPreviewService {
             lines = [line.strip() for line in text.splitlines() if line.strip()]
             target_duration = "2"
             media_sequence = 0
-            map_uri = "init.mp4"
+            map_uri = None
             segments = []
             pending = []
             duration = 2.0
@@ -482,11 +541,12 @@ final class CalibrationPreviewService {
         def render(target_duration, media_sequence, map_uri, segments, start_index):
             out = [
                 "#EXTM3U",
-                "#EXT-X-VERSION:7",
+                "#EXT-X-VERSION:7" if map_uri else "#EXT-X-VERSION:3",
                 "#EXT-X-TARGETDURATION:" + str(target_duration),
-                "#EXT-X-MEDIA-SEQUENCE:" + str(media_sequence + start_index),
-                '#EXT-X-MAP:URI="' + prefixed(map_uri) + '"'
+                "#EXT-X-MEDIA-SEQUENCE:" + str(media_sequence + start_index)
             ]
+            if map_uri:
+                out.append('#EXT-X-MAP:URI="' + prefixed(map_uri) + '"')
             for _, tags, uri in segments:
                 out.extend(tags)
                 out.append(prefixed(uri))
