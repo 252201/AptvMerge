@@ -9,6 +9,7 @@ final class CalibrationPreviewService {
     private var audioProcess: Process?
     private var videoDelayProcess: Process?
     private var audioDelayProcess: Process?
+    private var audioMergeDelayProcess: Process?
     private var ignoredTerminationPIDs = Set<Int32>()
     private var isStopping = false
 
@@ -37,6 +38,10 @@ final class CalibrationPreviewService {
 
     private var audioMergeDirectory: URL {
         runtimeDirectory.appendingPathComponent("audio-merge", isDirectory: true)
+    }
+
+    private var audioMergeDelayedDirectory: URL {
+        runtimeDirectory.appendingPathComponent("audio-merge-delayed", isDirectory: true)
     }
 
     private var videoDelayControlURL: URL {
@@ -89,15 +94,23 @@ final class CalibrationPreviewService {
             sourceSubdirectory: "audio",
             name: "cal-audio-delay"
         )
+        try startDelayedPlaylist(
+            sourcePlaylist: audioMergeDirectory.appendingPathComponent("index.m3u8"),
+            outputPlaylist: audioMergeDelayedDirectory.appendingPathComponent("index.m3u8"),
+            delayControl: audioDelayControlURL,
+            sourceSubdirectory: "audio-merge",
+            name: "cal-audio-merge-delay"
+        )
 
         try await waitForPlaylist(videoDelayedDirectory.appendingPathComponent("index.m3u8"), process: { self.videoDelayProcess }, name: "视频源预览")
         try await waitForPlaylist(audioDelayedDirectory.appendingPathComponent("index.m3u8"), process: { self.audioDelayProcess }, name: "音频源预览")
+        try await waitForPlaylist(audioMergeDelayedDirectory.appendingPathComponent("index.m3u8"), process: { self.audioMergeDelayProcess }, name: "音频合流延迟中继")
 
         return (
             videoPreviewURL: "http://127.0.0.1:\(port)/video-delayed/index.m3u8",
             audioPreviewURL: "http://127.0.0.1:\(port)/audio-delayed/index.m3u8",
-            videoMergeURL: "http://127.0.0.1:\(port)/video/index.m3u8",
-            audioMergeURL: "http://127.0.0.1:\(port)/audio-merge/index.m3u8"
+            videoMergeURL: "http://127.0.0.1:\(port)/video-delayed/index.m3u8",
+            audioMergeURL: "http://127.0.0.1:\(port)/audio-merge-delayed/index.m3u8"
         )
     }
 
@@ -110,6 +123,7 @@ final class CalibrationPreviewService {
         isStopping = true
         await stopProcess(videoDelayProcess, name: "cal-video-delay")
         await stopProcess(audioDelayProcess, name: "cal-audio-delay")
+        await stopProcess(audioMergeDelayProcess, name: "cal-audio-merge-delay")
         await stopProcess(videoProcess, name: "cal-video")
         await stopProcess(audioProcess, name: "cal-audio")
         await stopProcess(httpProcess, name: "cal-http")
@@ -117,6 +131,7 @@ final class CalibrationPreviewService {
         audioProcess = nil
         videoDelayProcess = nil
         audioDelayProcess = nil
+        audioMergeDelayProcess = nil
         httpProcess = nil
         isStopping = false
     }
@@ -127,11 +142,13 @@ final class CalibrationPreviewService {
         try FileManager.default.createDirectory(at: videoDelayedDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioDelayedDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioMergeDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: audioMergeDelayedDirectory, withIntermediateDirectories: true)
         try cleanDirectory(videoDirectory)
         try cleanDirectory(audioDirectory)
         try cleanDirectory(videoDelayedDirectory)
         try cleanDirectory(audioDelayedDirectory)
         try cleanDirectory(audioMergeDirectory)
+        try cleanDirectory(audioMergeDelayedDirectory)
     }
 
     private func cleanDirectory(_ url: URL) throws {
@@ -273,6 +290,8 @@ final class CalibrationPreviewService {
 
         if name == "cal-video-delay" {
             videoDelayProcess = process
+        } else if name == "cal-audio-merge-delay" {
+            audioMergeDelayProcess = process
         } else {
             audioDelayProcess = process
         }

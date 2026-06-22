@@ -104,7 +104,7 @@ final class MergeService {
         do {
             try startHTTPServer()
             log("复用校准预览流启动合流，\(formatDelayDescription(delaySeconds))")
-            try startCalibrationMerge(videoURL: videoURL, audioURL: audioURL, delaySeconds: delaySeconds)
+            try startCalibrationMerge(videoURL: videoURL, audioURL: audioURL)
             try await waitForOutputPlaylist()
             try startPreviewStream()
             try await waitForPreviewPlaylist()
@@ -287,11 +287,11 @@ final class MergeService {
         mergeProcess = process
     }
 
-    private func startCalibrationMerge(videoURL: String, audioURL: String, delaySeconds: Double) throws {
+    private func startCalibrationMerge(videoURL: String, audioURL: String) throws {
         let ffmpeg = try ffmpegPath()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)
-        process.arguments = calibrationMergeArguments(videoURL: videoURL, audioURL: audioURL, delaySeconds: delaySeconds)
+        process.arguments = calibrationMergeArguments(videoURL: videoURL, audioURL: audioURL)
         attachLogging(to: process, name: "merge")
         attachTerminationHandler(to: process, name: "merge")
         try process.run()
@@ -425,7 +425,7 @@ final class MergeService {
         return args
     }
 
-    private func calibrationMergeArguments(videoURL: String, audioURL: String, delaySeconds: Double) -> [String] {
+    private func calibrationMergeArguments(videoURL: String, audioURL: String) -> [String] {
         var args = [
             "-nostdin",
             "-hide_banner",
@@ -434,14 +434,11 @@ final class MergeService {
             "-fflags", "+genpts"
         ]
 
-        if delaySeconds > 0 {
-            args += ["-itsoffset", delaySeconds.formatted(.number.precision(.fractionLength(0...3)))]
-        }
-
         args += [
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
             "-allowed_extensions", "ALL",
             "-thread_queue_size", "4096",
+            "-live_start_index", "0",
             "-i", videoURL,
             "-fflags", "+genpts"
         ]
@@ -450,21 +447,13 @@ final class MergeService {
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
             "-allowed_extensions", "ALL",
             "-thread_queue_size", "4096",
+            "-live_start_index", "0",
             "-i", audioURL,
             "-map", "0:v:0",
             "-map", "1:a:0",
             "-c:v", "copy",
-            "-tag:v", "hvc1"
-        ]
-
-        if delaySeconds < 0 {
-            let delayMilliseconds = Int((-delaySeconds * 1000).rounded())
-            args += ["-filter:a", "adelay=\(delayMilliseconds):all=1,aresample=async=1:first_pts=0"]
-        } else {
-            args += ["-filter:a", "aresample=async=1:first_pts=0"]
-        }
-
-        args += [
+            "-tag:v", "hvc1",
+            "-filter:a", "aresample=async=1:first_pts=0",
             "-c:a", "aac",
             "-b:a", "128k"
         ]

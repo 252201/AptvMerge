@@ -172,6 +172,9 @@ struct ContentView: View {
                 SourceRow(
                     source: source,
                     isSelected: selectedID.wrappedValue == source.id,
+                    onPlay: {
+                        Task { await model.playSourceInMainPlayer(source) }
+                    },
                     onDelete: {
                         sourcePendingDeletion = source
                     }
@@ -182,6 +185,9 @@ struct ContentView: View {
                     model.persistSelection()
                 }
                 .contextMenu {
+                    Button("单独播放") {
+                        Task { await model.playSourceInMainPlayer(source) }
+                    }
                     Button("编辑") {
                         editingSource = SourceEditorState(source: source)
                     }
@@ -211,10 +217,15 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     serviceControls
+                    if model.standalonePreviewSource != nil {
+                        mainPlayerPanel
+                    }
                     if model.isCalibrating {
                         calibrationPanel
                     } else {
-                        InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
+                        if model.standalonePreviewSource == nil {
+                            mainPlayerPanel
+                        }
                         runtimeSettings
                     }
                 }
@@ -377,6 +388,26 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var mainPlayerPanel: some View {
+        if let source = model.standalonePreviewSource {
+            InAppPlayerPanel(
+                previewURL: model.standalonePreviewURL,
+                isRunning: !model.standalonePreviewURL.isEmpty,
+                title: "单独播放",
+                subtitle: source.name,
+                userAgent: "",
+                rewritesLocalhost: false,
+                emptyText: model.isStandalonePreviewStarting ? "单独播放准备中" : "请选择一个源播放",
+                onClose: {
+                    Task { await model.stopStandalonePreview() }
+                }
+            )
+        } else {
+            InAppPlayerPanel(previewURL: model.previewURL, isRunning: model.isRunning)
+        }
+    }
+
+    @ViewBuilder
     private var calibrationPanel: some View {
         if let video = model.selectedVideoSource, let audio = model.selectedAudioSource {
             VStack(alignment: .leading, spacing: 14) {
@@ -493,6 +524,7 @@ private struct WindowAccessor: NSViewRepresentable {
 private struct SourceRow: View {
     let source: StreamSource
     let isSelected: Bool
+    let onPlay: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -512,6 +544,14 @@ private struct SourceRow: View {
             }
 
             Spacer(minLength: 8)
+
+            Button(action: onPlay) {
+                Image(systemName: "play.fill")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("单独播放")
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")

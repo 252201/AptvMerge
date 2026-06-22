@@ -26,12 +26,16 @@ final class AppModel: ObservableObject {
     @Published var statusText = "已停止"
     @Published var outputURL = ""
     @Published var previewURL = ""
+    @Published var standalonePreviewSource: StreamSource?
+    @Published var standalonePreviewURL = ""
+    @Published var isStandalonePreviewStarting = false
     @Published var isOutputURLVisible = false
     @Published var logs: [String] = []
 
     private let store = SourceStore()
     private let service = MergeService()
     private let calibrationPreviewService = CalibrationPreviewService()
+    private let singleSourcePreviewService = SingleSourcePreviewService()
     private var currentLogFileURL: URL?
 
     private var logsDirectory: URL {
@@ -64,6 +68,11 @@ final class AppModel: ObservableObject {
                 self?.appendLog(message)
             }
         }
+        singleSourcePreviewService.onLog = { [weak self] message in
+            Task { @MainActor in
+                self?.appendLog(message)
+            }
+        }
         service.onStateChange = { [weak self] running, status, url, previewURL in
             Task { @MainActor in
                 guard let self else { return }
@@ -75,10 +84,14 @@ final class AppModel: ObservableObject {
                 self.previewURL = previewURL
                 if !running {
                     await self.calibrationPreviewService.stop()
+                    await self.singleSourcePreviewService.stop()
                     self.videoCalibrationPreviewURL = ""
                     self.audioCalibrationPreviewURL = ""
                     self.videoCalibrationMergeURL = ""
                     self.audioCalibrationMergeURL = ""
+                    self.standalonePreviewSource = nil
+                    self.standalonePreviewURL = ""
+                    self.isStandalonePreviewStarting = false
                 }
             }
         }
@@ -145,6 +158,10 @@ final class AppModel: ObservableObject {
         statusText = "准备校准"
         outputURL = ""
         previewURL = ""
+        await singleSourcePreviewService.stop()
+        standalonePreviewSource = nil
+        standalonePreviewURL = ""
+        isStandalonePreviewStarting = false
         videoCalibrationPreviewURL = ""
         audioCalibrationPreviewURL = ""
         videoCalibrationMergeURL = ""
@@ -201,6 +218,10 @@ final class AppModel: ObservableObject {
         statusText = "合并启动中"
         outputURL = ""
         previewURL = ""
+        await singleSourcePreviewService.stop()
+        standalonePreviewSource = nil
+        standalonePreviewURL = ""
+        isStandalonePreviewStarting = false
         startNewLogFile(video: video, audio: audio, modeDescription: calibrationMergeDescription)
 
         do {
@@ -247,6 +268,10 @@ final class AppModel: ObservableObject {
         statusText = "已停止"
         outputURL = ""
         previewURL = ""
+        await singleSourcePreviewService.stop()
+        standalonePreviewSource = nil
+        standalonePreviewURL = ""
+        isStandalonePreviewStarting = false
         videoCalibrationPreviewURL = ""
         audioCalibrationPreviewURL = ""
         videoCalibrationMergeURL = ""
@@ -279,6 +304,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func playSourceInMainPlayer(_ source: StreamSource) async {
+        guard !isStandalonePreviewStarting else { return }
+
+        isStandalonePreviewStarting = true
+        standalonePreviewSource = source
+        standalonePreviewURL = ""
+        appendLog("单独播放源: \(source.name)")
+
+        do {
+            let url = try await singleSourcePreviewService.start(source: source)
+            standalonePreviewURL = url
+            isStandalonePreviewStarting = false
+        } catch {
+            appendLog("单独播放启动失败: \(error.localizedDescription)")
+            await singleSourcePreviewService.stop()
+            standalonePreviewURL = ""
+            isStandalonePreviewStarting = false
+        }
+    }
+
+    func stopStandalonePreview() async {
+        await singleSourcePreviewService.stop()
+        standalonePreviewSource = nil
+        standalonePreviewURL = ""
+        isStandalonePreviewStarting = false
+    }
+
     func saveSource(_ source: StreamSource) {
         if let index = sources.firstIndex(where: { $0.id == source.id }) {
             var updated = source
@@ -299,6 +351,9 @@ final class AppModel: ObservableObject {
 
     func deleteSource(_ source: StreamSource) {
         sources.removeAll { $0.id == source.id }
+        if standalonePreviewSource?.id == source.id {
+            Task { await stopStandalonePreview() }
+        }
         if selectedVideoID == source.id {
             selectedVideoID = videoSources.first?.id
         }
