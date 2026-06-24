@@ -78,7 +78,7 @@ struct InAppPlayerPanel: View {
 struct NativePlayerView: NSViewRepresentable {
     let urlString: String
     var userAgent: String = ""
-    var delaySeconds: Double = 0
+    var delayRefreshToken: Double = 0
     var isMuted: Bool = false
 
     func makeCoordinator() -> Coordinator {
@@ -95,11 +95,18 @@ struct NativePlayerView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
-        let roundedDelay = (delaySeconds * 10).rounded() / 10
-        let signature = "\(urlString)|\(userAgent)|\(roundedDelay)|\(isMuted)"
-        guard context.coordinator.currentSignature != signature else { return }
+        let signature = "\(urlString)|\(userAgent)|\(isMuted)"
+        let roundedDelayToken = (delayRefreshToken * 10).rounded() / 10
+        if context.coordinator.currentSignature == signature {
+            context.coordinator.refreshLiveEdgeIfNeeded(on: nsView, delayToken: roundedDelayToken)
+            return
+        }
+
         context.coordinator.currentSignature = signature
+        context.coordinator.currentDelayToken = roundedDelayToken
         context.coordinator.pendingPlayTask?.cancel()
+        context.coordinator.pendingSeekTask?.cancel()
+        context.coordinator.pendingAutoPlayTask?.cancel()
 
         guard let url = URL(string: urlString) else {
             context.coordinator.stopPlayer(on: nsView)
@@ -122,35 +129,110 @@ struct NativePlayerView: NSViewRepresentable {
 
     static func dismantleNSView(_ nsView: AVPlayerView, coordinator: Coordinator) {
         coordinator.pendingPlayTask?.cancel()
+        coordinator.pendingSeekTask?.cancel()
+        coordinator.pendingAutoPlayTask?.cancel()
         coordinator.stopPlayer(on: nsView)
     }
 
     final class Coordinator {
         var currentSignature = ""
+        var currentDelayToken: Double?
         var pendingPlayTask: Task<Void, Never>?
+        var pendingSeekTask: Task<Void, Never>?
+        var pendingAutoPlayTask: Task<Void, Never>?
         private var currentPlayer: AVPlayer?
 
         @MainActor
         func startPlayer(on view: AVPlayerView, url: URL, userAgent: String, isMuted: Bool) {
-            let player: AVPlayer
+            let asset: AVURLAsset
             if userAgent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                player = AVPlayer(url: url)
+                asset = AVURLAsset(url: url)
             } else {
-                let asset = AVURLAsset(
+                asset = AVURLAsset(
                     url: url,
                     options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": userAgent]]
                 )
-                player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
             }
 
+            let item = AVPlayerItem(asset: asset)
+            item.preferredForwardBufferDuration = 0
+            item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
+
+            let player = AVPlayer(playerItem: item)
+            player.automaticallyWaitsToMinimizeStalling = false
             player.isMuted = isMuted
             currentPlayer = player
             view.player = player
             player.play()
+            scheduleAutoPlayNudges(on: view, player: player)
+        }
+
+        @MainActor
+        private func scheduleAutoPlayNudges(on view: AVPlayerView, player: AVPlayer) {
+            pendingAutoPlayTask?.cancel()
+            pendingAutoPlayTask = Task { @MainActor in
+                let delays: [UInt64] = [
+                    150_000_000,
+                    350_000_000,
+                    700_000_000,
+                    1_200_000_000,
+                    2_000_000_000
+                ]
+
+                for delay in delays {
+                    try? await Task.sleep(nanoseconds: delay)
+                    guard !Task.isCancelled else { return }
+                    guard self.currentPlayer === player, view.player === player else { return }
+
+                    if player.rate == 0 {
+                        self.seekToLiveEdge(on: view)
+                    } else {
+                        player.play()
+                    }
+                }
+            }
+        }
+
+        @MainActor
+        func refreshLiveEdgeIfNeeded(on view: AVPlayerView, delayToken: Double) {
+            guard currentDelayToken != delayToken else { return }
+            currentDelayToken = delayToken
+            pendingSeekTask?.cancel()
+            pendingSeekTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled else { return }
+                seekToLiveEdge(on: view)
+            }
+        }
+
+        @MainActor
+        private func seekToLiveEdge(on view: AVPlayerView) {
+            guard let player = currentPlayer ?? view.player,
+                  let item = player.currentItem
+            else { return }
+
+            let ranges = item.seekableTimeRanges
+            guard let rangeValue = ranges.last?.timeRangeValue else {
+                player.play()
+                return
+            }
+
+            let liveEdge = CMTimeRangeGetEnd(rangeValue)
+            guard liveEdge.isValid, liveEdge.isNumeric else {
+                player.play()
+                return
+            }
+
+            let target = CMTimeSubtract(liveEdge, CMTime(seconds: 0.15, preferredTimescale: 600))
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { _ in
+                player.play()
+            }
         }
 
         @MainActor
         func stopPlayer(on view: AVPlayerView) {
+            pendingSeekTask?.cancel()
+            pendingAutoPlayTask?.cancel()
             currentPlayer?.pause()
             currentPlayer?.replaceCurrentItem(with: nil)
             currentPlayer = nil

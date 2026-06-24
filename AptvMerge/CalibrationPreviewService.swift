@@ -602,7 +602,7 @@ final class CalibrationPreviewService {
                         write_atomic(render(target_duration, media_sequence, map_uri, selected, start))
             except Exception as exc:
                 print(exc, flush=True)
-            time.sleep(0.5)
+            time.sleep(0.2)
         """#
     }
 }

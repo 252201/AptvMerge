@@ -630,7 +630,7 @@ private struct SourcePreviewPanel: View {
                 } else {
                     NativePlayerView(
                         urlString: previewURL,
-                        delaySeconds: delaySeconds,
+                        delayRefreshToken: delaySeconds,
                         isMuted: isMuted
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 6))
