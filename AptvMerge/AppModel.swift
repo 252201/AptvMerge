@@ -397,9 +397,55 @@ final class AppModel: ObservableObject {
         persistSelection()
     }
 
+    func moveSources(kind: StreamSource.Kind, fromOffsets: IndexSet, toOffset: Int) {
+        var kindSources = sources.filter { $0.kind == kind }
+        moveItems(in: &kindSources, fromOffsets: fromOffsets, toOffset: toOffset)
+        replaceSources(of: kind, with: kindSources)
+    }
+
+    func moveSource(_ source: StreamSource, up: Bool) {
+        var kindSources = sources.filter { $0.kind == source.kind }
+        guard let index = kindSources.firstIndex(where: { $0.id == source.id }) else { return }
+
+        let targetIndex = up ? index - 1 : index + 1
+        guard kindSources.indices.contains(targetIndex) else { return }
+
+        kindSources.swapAt(index, targetIndex)
+        replaceSources(of: source.kind, with: kindSources)
+    }
+
+    func canMoveSource(_ source: StreamSource, up: Bool) -> Bool {
+        let kindSources = sources.filter { $0.kind == source.kind }
+        guard let index = kindSources.firstIndex(where: { $0.id == source.id }) else { return false }
+        return up ? index > 0 : index < kindSources.count - 1
+    }
+
     func persistSelection() {
         store.saveSelectedID(selectedVideoID, key: "selectedVideoID")
         store.saveSelectedID(selectedAudioID, key: "selectedAudioID")
+    }
+
+    private func replaceSources(of kind: StreamSource.Kind, with orderedSources: [StreamSource]) {
+        var remaining = ArraySlice(orderedSources)
+        var updatedSources = sources
+        for index in updatedSources.indices where updatedSources[index].kind == kind {
+            guard let next = remaining.popFirst() else { break }
+            updatedSources[index] = next
+        }
+        sources = updatedSources
+        store.saveSources(sources)
+        persistSelection()
+    }
+
+    private func moveItems(in items: inout [StreamSource], fromOffsets: IndexSet, toOffset: Int) {
+        let movingItems = fromOffsets.sorted().map { items[$0] }
+        for offset in fromOffsets.sorted(by: >) {
+            items.remove(at: offset)
+        }
+
+        let removedBeforeDestination = fromOffsets.filter { $0 < toOffset }.count
+        let insertionIndex = max(0, min(items.count, toOffset - removedBeforeDestination))
+        items.insert(contentsOf: movingItems, at: insertionIndex)
     }
 
     func clearLogs() {

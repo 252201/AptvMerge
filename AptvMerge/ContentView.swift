@@ -175,6 +175,9 @@ struct ContentView: View {
                     onPlay: {
                         Task { await model.playSourceInMainPlayer(source) }
                     },
+                    onEdit: {
+                        editingSource = SourceEditorState(source: source)
+                    },
                     onDelete: {
                         sourcePendingDeletion = source
                     }
@@ -191,10 +194,21 @@ struct ContentView: View {
                     Button("编辑") {
                         editingSource = SourceEditorState(source: source)
                     }
+                    Button("上移") {
+                        model.moveSource(source, up: true)
+                    }
+                    .disabled(!model.canMoveSource(source, up: true))
+                    Button("下移") {
+                        model.moveSource(source, up: false)
+                    }
+                    .disabled(!model.canMoveSource(source, up: false))
                     Button("删除", role: .destructive) {
                         sourcePendingDeletion = source
                     }
                 }
+            }
+            .onMove { indices, newOffset in
+                model.moveSources(kind: type, fromOffsets: indices, toOffset: newOffset)
             }
 
             Button {
@@ -525,6 +539,7 @@ private struct SourceRow: View {
     let source: StreamSource
     let isSelected: Bool
     let onPlay: () -> Void
+    let onEdit: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -552,6 +567,14 @@ private struct SourceRow: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .help("单独播放")
+
+            Button(action: onEdit) {
+                Image(systemName: "pencil")
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help("编辑源")
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")

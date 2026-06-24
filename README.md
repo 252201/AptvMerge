@@ -11,11 +11,13 @@ It is designed for local network playback with apps such as APTV, Apple TV playe
 - Merge a video live stream with a separate audio/commentary live stream.
 - Serve the merged HLS stream on the local network, for example `http://<mac-lan-ip>:8080/index.m3u8`.
 - Preview playback inside the app through a local fMP4 HLS stream.
-- Add, edit, and delete video/audio sources.
-- Configure sync delay:
+- Add, edit, delete, and manually reorder video/audio sources.
+- Calibrate video/audio sync with side-by-side source previews before merging.
+- Confirm merge from the calibrated source timeline so the merged output follows the calibrated sync result.
+- Fine-tune sync delay:
   - `0`: direct merge with no buffer layer.
-  - Positive value: delay video by buffering video segments.
-  - Negative value: delay audio with an audio relay and FFmpeg audio delay filter.
+  - Positive value: delay video.
+  - Negative value: delay audio.
 - Hide or reveal the output URL in the UI.
 - View runtime logs in a right-side log panel.
 
@@ -111,15 +113,25 @@ open /Applications/AptvMerge.app
 
 1. Select a video source from the left video list.
 2. Select an audio/commentary source from the left audio list.
-3. Set the delay:
-   - `0` for direct merge.
-   - Positive seconds when the video should be delayed.
-   - Negative seconds when the audio should be delayed.
-4. Click **Start**.
-5. Reveal or copy the generated HLS URL.
-6. Open the URL from APTV, Apple TV, or another device on the same LAN.
+3. Click **Start** to enter sync calibration.
+4. Use the two preview panes to align the video source and audio/commentary source:
+   - Increase the video delay when the video should play later.
+   - Increase the audio delay when the commentary should play later.
+5. Click **Confirm Merge** after the previews are in sync.
+6. Reveal or copy the generated HLS URL.
+7. Open the URL from APTV, Apple TV, or another device on the same LAN.
 
 The in-app preview starts automatically after the local preview stream is ready.
+
+You can still fine-tune the delay after merging with the delay control in the main panel. When the merge was started from calibration, AptvMerge keeps using the existing calibrated local source timeline instead of reconnecting to the remote sources.
+
+### Manage Sources
+
+- Click the plus row under **Video Sources** or **Audio Sources** to add a source.
+- Click the pencil button on a source row to edit its name, URL, or User-Agent.
+- Click the play button to preview a single source inside the app.
+- Drag source rows within their section to reorder them.
+- Use the row context menu for **Edit**, **Move Up**, **Move Down**, or **Delete**.
 
 ## Local Data
 
