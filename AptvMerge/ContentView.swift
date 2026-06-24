@@ -361,8 +361,8 @@ struct ContentView: View {
                 .font(.headline)
 
             HStack(alignment: .center, spacing: 14) {
-                Stepper(value: $model.delaySeconds, in: -120...240, step: 0.5) {
-                    TextField("0", value: $model.delaySeconds, format: .number.precision(.fractionLength(0...1)))
+                Stepper(value: $model.delaySeconds, in: -120...240, step: 0.1) {
+                    TextField("0", value: $model.delaySeconds, format: .number.precision(.fractionLength(0...2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 90)
                 }
@@ -643,13 +643,13 @@ private struct SourcePreviewPanel: View {
             }
 
             HStack(alignment: .center, spacing: 10) {
-                Stepper(value: $delaySeconds, in: 0...240, step: 0.5) {
-                    TextField("0", value: $delaySeconds, format: .number.precision(.fractionLength(0...1)))
+                Stepper(value: $delaySeconds, in: 0...240, step: 0.1) {
+                    TextField("0", value: $delaySeconds, format: .number.precision(.fractionLength(0...2)))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 72)
                 }
 
-                Text("延迟 \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+                Text("延迟 \(delaySeconds.formatted(.number.precision(.fractionLength(0...2))))s")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 78, alignment: .leading)

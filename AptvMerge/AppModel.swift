@@ -144,7 +144,7 @@ final class AppModel: ObservableObject {
     }
 
     private var formattedDelay: String {
-        delaySeconds.formatted(.number.precision(.fractionLength(0...1)))
+        delaySeconds.formatted(.number.precision(.fractionLength(0...2)))
     }
 
     func startService() async {
@@ -225,7 +225,11 @@ final class AppModel: ObservableObject {
         startNewLogFile(video: video, audio: audio, modeDescription: calibrationMergeDescription)
 
         do {
+            let snapshot = try await calibrationPreviewService.createMergeSnapshot()
+            videoCalibrationMergeURL = snapshot.videoURL
+            audioCalibrationMergeURL = snapshot.audioURL
             appendLog("确认合并：复用当前校准源流，不重新连接远端源")
+            appendLog("确认合并：已冻结校准快照，合流从确认时刻的延迟时间线启动")
             appendLog("合流阶段应用校准时差: \(calibrationMergeDescription)")
             try await service.startFromCalibration(
                 videoURL: videoCalibrationMergeURL,
@@ -234,8 +238,6 @@ final class AppModel: ObservableObject {
             )
             videoCalibrationPreviewURL = ""
             audioCalibrationPreviewURL = ""
-            videoCalibrationMergeURL = ""
-            audioCalibrationMergeURL = ""
         } catch {
             appendLog("启动失败: \(error.localizedDescription)")
             isStarting = false
@@ -282,6 +284,37 @@ final class AppModel: ObservableObject {
         guard !isStarting else { return }
         UserDefaults.standard.set(delaySeconds, forKey: "delaySeconds")
         guard isRunning else { return }
+        if !videoCalibrationMergeURL.isEmpty || !audioCalibrationMergeURL.isEmpty {
+            isStarting = true
+            statusText = "应用时差中"
+            appendLog("应用新时差: \(delayDescription)")
+            do {
+                try calibrationPreviewService.updateDelays(
+                    videoDelay: max(0, delaySeconds),
+                    audioDelay: max(0, -delaySeconds)
+                )
+                let snapshot = try await calibrationPreviewService.createMergeSnapshot()
+                videoCalibrationMergeURL = snapshot.videoURL
+                audioCalibrationMergeURL = snapshot.audioURL
+                appendLog("已从当前校准源流重新生成合流快照，不重新连接远端源")
+                try await service.startFromCalibration(
+                    videoURL: videoCalibrationMergeURL,
+                    audioURL: audioCalibrationMergeURL,
+                    delaySeconds: delaySeconds
+                )
+                isStarting = false
+                if isRunning {
+                    statusText = "运行中"
+                }
+            } catch {
+                isStarting = false
+                appendLog("应用时差失败: \(error.localizedDescription)")
+                if isRunning {
+                    statusText = "运行中"
+                }
+            }
+            return
+        }
         guard let video = selectedVideoSource, let audio = selectedAudioSource else {
             appendLog("请选择视频源和音频源")
             return
@@ -415,7 +448,7 @@ final class AppModel: ObservableObject {
     }
 
     private func formatDelayDescription(_ delay: Double) -> String {
-        let formatted = delay.formatted(.number.precision(.fractionLength(0...1)))
+        let formatted = delay.formatted(.number.precision(.fractionLength(0...2)))
         if delay == 0 {
             return "不设置时差"
         } else if delay > 0 {

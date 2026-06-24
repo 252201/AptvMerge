@@ -11,6 +11,7 @@ final class MergeService {
     private var readerProcess: Process?
     private var mergeProcess: Process?
     private var previewProcess: Process?
+    private var healthMonitorTask: Task<Void, Never>?
     private var outputURL = ""
     private var previewOutputURL = ""
     private var currentDelaySeconds: Double = 0
@@ -62,7 +63,7 @@ final class MergeService {
             try startHTTPServer()
 
             if delaySeconds > 0 {
-                log("启动视频缓存层，视频延后 \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+                log("启动视频缓存层，视频延后 \(delaySeconds.formatted(.number.precision(.fractionLength(0...2))))s")
                 try startVideoBuffer(video: video)
                 try await waitForBuffer(delaySeconds: delaySeconds, label: "视频")
                 log("启动音频中继，稳定解说音轨")
@@ -71,7 +72,7 @@ final class MergeService {
                 try startBufferedVideoMerge(delaySeconds: delaySeconds)
             } else if delaySeconds < 0 {
                 let audioDelay = -delaySeconds
-                log("启动音频中继，音频延后 \(audioDelay.formatted(.number.precision(.fractionLength(0...1))))s")
+                log("启动音频中继，音频延后 \(audioDelay.formatted(.number.precision(.fractionLength(0...2))))s")
                 try startAudioRelay(audio: audio)
                 try await waitForAudioRelayPlaylist()
                 try startAudioRelayOffsetMerge(video: video, delaySeconds: audioDelay)
@@ -83,6 +84,7 @@ final class MergeService {
             try await waitForOutputPlaylist()
             try startPreviewStream()
             try await waitForPreviewPlaylist()
+            startHealthMonitor()
             onStateChange?(true, "运行中", outputURL, previewOutputURL)
             log("APTV 链接: \(outputURL)")
         } catch {
@@ -108,6 +110,7 @@ final class MergeService {
             try await waitForOutputPlaylist()
             try startPreviewStream()
             try await waitForPreviewPlaylist()
+            startHealthMonitor()
             onStateChange?(true, "运行中", outputURL, previewOutputURL)
             log("APTV 链接: \(outputURL)")
         } catch {
@@ -128,7 +131,7 @@ final class MergeService {
            audioRelayProcess?.isRunning == true,
            httpProcess?.isRunning == true {
             if bufferedSeconds() < delaySeconds {
-                log("等待缓存达到新时差 \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+                log("等待缓存达到新时差 \(delaySeconds.formatted(.number.precision(.fractionLength(0...2))))s")
                 try await waitForBuffer(delaySeconds: delaySeconds, label: "视频")
             }
             log("视频延后模式内切换，正在重启合流进程应用新时差")
@@ -153,6 +156,8 @@ final class MergeService {
 
     func stop(notifyState: Bool = true) async {
         isStopping = true
+        healthMonitorTask?.cancel()
+        healthMonitorTask = nil
         await stopProcess(previewProcess, name: "preview")
         await stopProcess(readerProcess, name: "reader")
         await stopProcess(mergeProcess, name: "merge")
@@ -219,8 +224,9 @@ final class MergeService {
             "-an",
             "-c:v", "copy",
             "-f", "hls",
-            "-hls_time", "2",
-            "-hls_list_size", "180",
+            "-hls_time", "1",
+            "-hls_list_size", "360",
+            "-hls_delete_threshold", "360",
             "-hls_flags", "delete_segments",
             "-hls_allow_cache", "0",
             "-hls_segment_filename", bufferDirectory.appendingPathComponent("vid_%05d.ts").path,
@@ -312,8 +318,9 @@ final class MergeService {
         try await waitForOutputPlaylist()
         try startPreviewStream()
         try await waitForPreviewPlaylist()
+        startHealthMonitor()
         onStateChange?(true, "运行中", outputURL, previewOutputURL)
-        log("已应用音频延后: \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+        log("已应用音频延后: \(delaySeconds.formatted(.number.precision(.fractionLength(0...2))))s")
     }
 
     private func startBufferedVideoMerge(delaySeconds: Double) throws {
@@ -358,8 +365,9 @@ final class MergeService {
         try await waitForOutputPlaylist()
         try startPreviewStream()
         try await waitForPreviewPlaylist()
+        startHealthMonitor()
         onStateChange?(true, "运行中", outputURL, previewOutputURL)
-        log("已应用视频延后: \(delaySeconds.formatted(.number.precision(.fractionLength(0...1))))s")
+        log("已应用视频延后: \(delaySeconds.formatted(.number.precision(.fractionLength(0...2))))s")
     }
 
     private func startBufferedAudioMerge(video: StreamSource, delaySeconds: Double) throws {
@@ -557,8 +565,9 @@ final class MergeService {
             "-c:a", "aac",
             "-b:a", "128k",
             "-f", "hls",
-            "-hls_time", "2",
-            "-hls_list_size", "180",
+            "-hls_time", "1",
+            "-hls_list_size", "360",
+            "-hls_delete_threshold", "360",
             "-hls_flags", "delete_segments",
             "-hls_allow_cache", "0",
             "-hls_segment_filename", bufferDirectory.appendingPathComponent("aud_%05d.ts").path,
@@ -595,9 +604,9 @@ final class MergeService {
             "-c:a", "aac",
             "-b:a", "128k",
             "-f", "hls",
-            "-hls_time", "2",
-            "-hls_list_size", "20",
-            "-hls_delete_threshold", "20",
+            "-hls_time", "1",
+            "-hls_list_size", "40",
+            "-hls_delete_threshold", "40",
             "-hls_flags", "delete_segments",
             "-hls_allow_cache", "0",
             "-hls_segment_filename", audioRelayDirectory.appendingPathComponent("aud_%05d.ts").path,
@@ -662,9 +671,9 @@ final class MergeService {
     private func hlsOutputArguments() -> [String] {
         [
             "-f", "hls",
-            "-hls_time", "4",
-            "-hls_list_size", "30",
-            "-hls_delete_threshold", "30",
+            "-hls_time", "2",
+            "-hls_list_size", "24",
+            "-hls_delete_threshold", "24",
             "-hls_flags", "delete_segments",
             "-hls_allow_cache", "0",
             "-hls_segment_filename", hlsDirectory.appendingPathComponent("seg_%05d.ts").path,
@@ -686,6 +695,7 @@ final class MergeService {
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
             "-rw_timeout", "12000000",
+            "-live_start_index", "-2",
             "-i", "http://127.0.0.1:\(port)/index.m3u8",
             "-map", "0:v:0",
             "-map", "0:a:0",
@@ -695,9 +705,9 @@ final class MergeService {
             "-f", "hls",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", "init.mp4",
-            "-hls_time", "4",
-            "-hls_list_size", "30",
-            "-hls_delete_threshold", "30",
+            "-hls_time", "2",
+            "-hls_list_size", "12",
+            "-hls_delete_threshold", "12",
             "-hls_flags", "delete_segments",
             "-hls_allow_cache", "0",
             "-hls_segment_filename", previewDirectory.appendingPathComponent("prev_%05d.m4s").path,
@@ -711,12 +721,12 @@ final class MergeService {
 
     private func waitForOutputPlaylist() async throws {
         let playlist = hlsDirectory.appendingPathComponent("index.m3u8")
-        try await waitForPlaylist(playlist, process: { self.mergeProcess }, timeout: 90, minimumSegments: 3, readyLog: "HLS 输出就绪")
+        try await waitForPlaylist(playlist, process: { self.mergeProcess }, timeout: 90, minimumSegments: 2, readyLog: "HLS 输出就绪")
     }
 
     private func waitForPreviewPlaylist() async throws {
         let playlist = previewDirectory.appendingPathComponent("index.m3u8")
-        try await waitForPlaylist(playlist, process: { self.previewProcess }, timeout: 45, minimumSegments: 3, readyLog: "内置播放流就绪")
+        try await waitForPlaylist(playlist, process: { self.previewProcess }, timeout: 45, minimumSegments: 1, readyLog: "内置播放流就绪")
     }
 
     private func waitForAudioRelayPlaylist() async throws {
@@ -739,17 +749,31 @@ final class MergeService {
             if process()?.isRunning != true {
                 throw MergeServiceError.mergeExited
             }
-            try await Task.sleep(for: .milliseconds(500))
+            try await Task.sleep(for: .milliseconds(250))
         }
         throw MergeServiceError.outputTimeout
     }
 
     private func mediaSegmentCount(in playlist: URL) -> Int {
         guard let text = try? String(contentsOf: playlist) else { return 0 }
+        let baseURL = playlist.deletingLastPathComponent()
         return text.split(separator: "\n").filter { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.isEmpty && !trimmed.hasPrefix("#")
+            guard !trimmed.isEmpty && !trimmed.hasPrefix("#") else { return false }
+            guard !trimmed.contains("://") else { return true }
+            return localMediaSegmentExists(String(trimmed), relativeTo: baseURL)
         }.count
+    }
+
+    private func localMediaSegmentExists(_ path: String, relativeTo baseURL: URL) -> Bool {
+        let segmentURL = URL(fileURLWithPath: path, relativeTo: baseURL).standardizedFileURL
+        guard FileManager.default.fileExists(atPath: segmentURL.path) else { return false }
+        guard let values = try? segmentURL.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize
+        else {
+            return false
+        }
+        return fileSize > 0
     }
 
     private func waitForFile(_ url: URL, timeout: TimeInterval) throws {
@@ -882,10 +906,53 @@ final class MergeService {
         log("[\(name)] 进程已退出，状态码 \(status)")
 
         if process == mergeProcess || process == httpProcess {
+            healthMonitorTask?.cancel()
+            healthMonitorTask = nil
             mergeProcess = process == mergeProcess ? nil : mergeProcess
             httpProcess = process == httpProcess ? nil : httpProcess
             onStateChange?(false, "已停止", "", "")
         }
+    }
+
+    private func startHealthMonitor() {
+        healthMonitorTask?.cancel()
+        let playlist = hlsDirectory.appendingPathComponent("index.m3u8")
+        healthMonitorTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var lastSequence = self.mediaSequence(in: playlist)
+            var lastAdvanceDate = Date()
+            self.log("HLS 健康监控已启动")
+
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled else { return }
+
+                let currentSequence = self.mediaSequence(in: playlist)
+                if currentSequence != nil, currentSequence != lastSequence {
+                    lastSequence = currentSequence
+                    lastAdvanceDate = Date()
+                    continue
+                }
+
+                let stalledSeconds = Date().timeIntervalSince(lastAdvanceDate)
+                if stalledSeconds >= 15 {
+                    let count = self.mediaSegmentCount(in: playlist)
+                    self.log("HLS 输出可能停滞: \(Int(stalledSeconds))s 未看到新分片，当前完整分片数 \(count)")
+                    lastAdvanceDate = Date()
+                }
+            }
+        }
+    }
+
+    private func mediaSequence(in playlist: URL) -> Int? {
+        guard let text = try? String(contentsOf: playlist) else { return nil }
+        for line in text.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("#EXT-X-MEDIA-SEQUENCE:") else { continue }
+            guard let value = trimmed.split(separator: ":").last else { return nil }
+            return Int(value)
+        }
+        return nil
     }
 
     private func stopProcess(_ process: Process?, name: String) async {
@@ -924,7 +991,7 @@ final class MergeService {
     }
 
     private func formatDelayDescription(_ delay: Double) -> String {
-        let formatted = delay.formatted(.number.precision(.fractionLength(0...1)))
+        let formatted = delay.formatted(.number.precision(.fractionLength(0...2)))
         if delay == 0 {
             return "不设置时差"
         } else if delay > 0 {

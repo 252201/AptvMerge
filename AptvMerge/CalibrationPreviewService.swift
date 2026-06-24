@@ -10,6 +10,8 @@ final class CalibrationPreviewService {
     private var videoDelayProcess: Process?
     private var audioDelayProcess: Process?
     private var audioMergeDelayProcess: Process?
+    private var videoMergeSnapshotProcess: Process?
+    private var audioMergeSnapshotProcess: Process?
     private var ignoredTerminationPIDs = Set<Int32>()
     private var isStopping = false
 
@@ -42,6 +44,14 @@ final class CalibrationPreviewService {
 
     private var audioMergeDelayedDirectory: URL {
         runtimeDirectory.appendingPathComponent("audio-merge-delayed", isDirectory: true)
+    }
+
+    private var videoMergeSnapshotDirectory: URL {
+        runtimeDirectory.appendingPathComponent("video-merge-snapshot", isDirectory: true)
+    }
+
+    private var audioMergeSnapshotDirectory: URL {
+        runtimeDirectory.appendingPathComponent("audio-merge-snapshot", isDirectory: true)
     }
 
     private var videoDelayControlURL: URL {
@@ -85,21 +95,27 @@ final class CalibrationPreviewService {
             outputPlaylist: videoDelayedDirectory.appendingPathComponent("index.m3u8"),
             delayControl: videoDelayControlURL,
             sourceSubdirectory: "video",
-            name: "cal-video-delay"
+            name: "cal-video-delay",
+            windowSegments: 12,
+            anchorAtStart: false
         )
         try startDelayedPlaylist(
             sourcePlaylist: audioDirectory.appendingPathComponent("index.m3u8"),
             outputPlaylist: audioDelayedDirectory.appendingPathComponent("index.m3u8"),
             delayControl: audioDelayControlURL,
             sourceSubdirectory: "audio",
-            name: "cal-audio-delay"
+            name: "cal-audio-delay",
+            windowSegments: 12,
+            anchorAtStart: false
         )
         try startDelayedPlaylist(
             sourcePlaylist: audioMergeDirectory.appendingPathComponent("index.m3u8"),
             outputPlaylist: audioMergeDelayedDirectory.appendingPathComponent("index.m3u8"),
             delayControl: audioDelayControlURL,
             sourceSubdirectory: "audio-merge",
-            name: "cal-audio-merge-delay"
+            name: "cal-audio-merge-delay",
+            windowSegments: 45,
+            anchorAtStart: false
         )
 
         try await waitForPlaylist(videoDelayedDirectory.appendingPathComponent("index.m3u8"), process: { self.videoDelayProcess }, name: "视频源预览")
@@ -119,11 +135,51 @@ final class CalibrationPreviewService {
         try writeDelay(max(0, audioDelay), to: audioDelayControlURL)
     }
 
+    func createMergeSnapshot() async throws -> (videoURL: String, audioURL: String) {
+        await stopProcess(videoMergeSnapshotProcess, name: "cal-video-merge-snapshot")
+        await stopProcess(audioMergeSnapshotProcess, name: "cal-audio-merge-snapshot")
+        videoMergeSnapshotProcess = nil
+        audioMergeSnapshotProcess = nil
+
+        try cleanDirectory(videoMergeSnapshotDirectory)
+        try cleanDirectory(audioMergeSnapshotDirectory)
+
+        try startDelayedPlaylist(
+            sourcePlaylist: videoDirectory.appendingPathComponent("index.m3u8"),
+            outputPlaylist: videoMergeSnapshotDirectory.appendingPathComponent("index.m3u8"),
+            delayControl: videoDelayControlURL,
+            sourceSubdirectory: "video",
+            name: "cal-video-merge-snapshot",
+            windowSegments: 120,
+            anchorAtStart: true
+        )
+        try startDelayedPlaylist(
+            sourcePlaylist: audioMergeDirectory.appendingPathComponent("index.m3u8"),
+            outputPlaylist: audioMergeSnapshotDirectory.appendingPathComponent("index.m3u8"),
+            delayControl: audioDelayControlURL,
+            sourceSubdirectory: "audio-merge",
+            name: "cal-audio-merge-snapshot",
+            windowSegments: 120,
+            anchorAtStart: true
+        )
+
+        try await waitForPlaylist(videoMergeSnapshotDirectory.appendingPathComponent("index.m3u8"), process: { self.videoMergeSnapshotProcess }, name: "视频合流快照")
+        try await waitForPlaylist(audioMergeSnapshotDirectory.appendingPathComponent("index.m3u8"), process: { self.audioMergeSnapshotProcess }, name: "音频合流快照")
+        log("已冻结确认时刻的校准快照，正式合流将从该时间线启动")
+
+        return (
+            videoURL: "http://127.0.0.1:\(port)/video-merge-snapshot/index.m3u8",
+            audioURL: "http://127.0.0.1:\(port)/audio-merge-snapshot/index.m3u8"
+        )
+    }
+
     func stop() async {
         isStopping = true
         await stopProcess(videoDelayProcess, name: "cal-video-delay")
         await stopProcess(audioDelayProcess, name: "cal-audio-delay")
         await stopProcess(audioMergeDelayProcess, name: "cal-audio-merge-delay")
+        await stopProcess(videoMergeSnapshotProcess, name: "cal-video-merge-snapshot")
+        await stopProcess(audioMergeSnapshotProcess, name: "cal-audio-merge-snapshot")
         await stopProcess(videoProcess, name: "cal-video")
         await stopProcess(audioProcess, name: "cal-audio")
         await stopProcess(httpProcess, name: "cal-http")
@@ -132,6 +188,8 @@ final class CalibrationPreviewService {
         videoDelayProcess = nil
         audioDelayProcess = nil
         audioMergeDelayProcess = nil
+        videoMergeSnapshotProcess = nil
+        audioMergeSnapshotProcess = nil
         httpProcess = nil
         isStopping = false
     }
@@ -143,12 +201,16 @@ final class CalibrationPreviewService {
         try FileManager.default.createDirectory(at: audioDelayedDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioMergeDirectory, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: audioMergeDelayedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: videoMergeSnapshotDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: audioMergeSnapshotDirectory, withIntermediateDirectories: true)
         try cleanDirectory(videoDirectory)
         try cleanDirectory(audioDirectory)
         try cleanDirectory(videoDelayedDirectory)
         try cleanDirectory(audioDelayedDirectory)
         try cleanDirectory(audioMergeDirectory)
         try cleanDirectory(audioMergeDelayedDirectory)
+        try cleanDirectory(videoMergeSnapshotDirectory)
+        try cleanDirectory(audioMergeSnapshotDirectory)
     }
 
     private func cleanDirectory(_ url: URL) throws {
@@ -210,9 +272,9 @@ final class CalibrationPreviewService {
         if name == "cal-audio" {
             args += [
                 "-hls_segment_type", "mpegts",
-                "-hls_time", "2",
-                "-hls_list_size", "180",
-                "-hls_delete_threshold", "180",
+                "-hls_time", "1",
+                "-hls_list_size", "360",
+                "-hls_delete_threshold", "360",
                 "-hls_flags", "delete_segments",
                 "-hls_allow_cache", "0",
                 "-hls_segment_filename", outputDirectory.appendingPathComponent("seg_%05d.ts").path,
@@ -223,9 +285,9 @@ final class CalibrationPreviewService {
                 "-tag:v", "hvc1",
                 "-hls_segment_type", "fmp4",
                 "-hls_fmp4_init_filename", "init.mp4",
-                "-hls_time", "2",
-                "-hls_list_size", "180",
-                "-hls_delete_threshold", "180",
+                "-hls_time", "1",
+                "-hls_list_size", "360",
+                "-hls_delete_threshold", "360",
                 "-hls_flags", "delete_segments",
                 "-hls_allow_cache", "0",
                 "-hls_segment_filename", outputDirectory.appendingPathComponent("seg_%05d.m4s").path,
@@ -241,9 +303,9 @@ final class CalibrationPreviewService {
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-f", "hls",
-                "-hls_time", "2",
-                "-hls_list_size", "180",
-                "-hls_delete_threshold", "180",
+                "-hls_time", "1",
+                "-hls_list_size", "360",
+                "-hls_delete_threshold", "360",
                 "-hls_flags", "delete_segments",
                 "-hls_allow_cache", "0",
                 "-hls_segment_filename", audioMergeDirectory.appendingPathComponent("aud_%05d.ts").path,
@@ -270,7 +332,9 @@ final class CalibrationPreviewService {
         outputPlaylist: URL,
         delayControl: URL,
         sourceSubdirectory: String,
-        name: String
+        name: String,
+        windowSegments: Int,
+        anchorAtStart: Bool
     ) throws {
         let python = try executablePath(candidates: ["/usr/bin/python3", "/opt/homebrew/bin/python3", "/usr/local/bin/python3"])
         let process = Process()
@@ -282,7 +346,9 @@ final class CalibrationPreviewService {
             sourcePlaylist.path,
             outputPlaylist.path,
             delayControl.path,
-            sourceSubdirectory
+            sourceSubdirectory,
+            "\(windowSegments)",
+            anchorAtStart ? "1" : "0"
         ]
         attachLogging(to: process, name: name)
         attachTerminationHandler(to: process, name: name)
@@ -292,6 +358,10 @@ final class CalibrationPreviewService {
             videoDelayProcess = process
         } else if name == "cal-audio-merge-delay" {
             audioMergeDelayProcess = process
+        } else if name == "cal-video-merge-snapshot" {
+            videoMergeSnapshotProcess = process
+        } else if name == "cal-audio-merge-snapshot" {
+            audioMergeSnapshotProcess = process
         } else {
             audioDelayProcess = process
         }
@@ -312,7 +382,7 @@ final class CalibrationPreviewService {
             if process()?.isRunning != true {
                 throw MergeServiceError.mergeExited
             }
-            try await Task.sleep(for: .milliseconds(500))
+            try await Task.sleep(for: .milliseconds(250))
         }
         throw MergeServiceError.outputTimeout
     }
@@ -336,7 +406,7 @@ final class CalibrationPreviewService {
                 if process()?.isRunning != true {
                     break
                 }
-                try await Task.sleep(for: .milliseconds(500))
+                try await Task.sleep(for: .milliseconds(250))
             }
 
             if mediaSegmentCount(in: playlist) >= 1 {
@@ -360,10 +430,24 @@ final class CalibrationPreviewService {
 
     private func mediaSegmentCount(in playlist: URL) -> Int {
         guard let text = try? String(contentsOf: playlist) else { return 0 }
+        let baseURL = playlist.deletingLastPathComponent()
         return text.split(separator: "\n").filter { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.isEmpty && !trimmed.hasPrefix("#")
+            guard !trimmed.isEmpty && !trimmed.hasPrefix("#") else { return false }
+            guard !trimmed.contains("://") else { return true }
+            return localMediaSegmentExists(String(trimmed), relativeTo: baseURL)
         }.count
+    }
+
+    private func localMediaSegmentExists(_ path: String, relativeTo baseURL: URL) -> Bool {
+        let segmentURL = URL(fileURLWithPath: path, relativeTo: baseURL).standardizedFileURL
+        guard FileManager.default.fileExists(atPath: segmentURL.path) else { return false }
+        guard let values = try? segmentURL.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize
+        else {
+            return false
+        }
+        return fileSize > 0
     }
 
     private func attachLogging(to process: Process, name: String) {
@@ -507,7 +591,9 @@ final class CalibrationPreviewService {
         import time
 
         source_playlist, output_playlist, delay_file, source_subdir = sys.argv[1:5]
-        window_segments = 8
+        window_segments = int(sys.argv[5]) if len(sys.argv) > 5 else 12
+        anchor_at_start = len(sys.argv) > 6 and sys.argv[6] == "1"
+        anchored_media_sequence = None
 
         def read_delay():
             try:
@@ -597,6 +683,16 @@ final class CalibrationPreviewService {
                     if end <= 0 and delay <= available_duration:
                         end = 1
                     start = max(0, end - window_segments)
+                    if anchor_at_start and anchored_media_sequence is None:
+                        anchored_media_sequence = media_sequence + start
+                        print(
+                            "Anchored delayed playlist at media sequence " + str(anchored_media_sequence),
+                            flush=True
+                        )
+                    if anchor_at_start and anchored_media_sequence is not None:
+                        anchor_index = anchored_media_sequence - media_sequence
+                        if 0 <= anchor_index < end:
+                            start = min(start, anchor_index)
                     selected = segments[start:end]
                     if selected:
                         write_atomic(render(target_duration, media_sequence, map_uri, selected, start))
